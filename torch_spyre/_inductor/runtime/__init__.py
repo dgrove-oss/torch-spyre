@@ -37,6 +37,7 @@ class TensorArg:
     dtype: torch.dtype
     host_size: torch.Size
     allocation: Any
+    scales: list[int]
     device_layout: SpyreTensorLayout
 
 
@@ -76,7 +77,6 @@ class KernelSpec:
     is_reduction: bool
     dimensions: list[int]
     args: Sequence[TensorArg | ConstantArg]
-    scales: list[list[int]]
     op_info: dict[str, Any]
 
 

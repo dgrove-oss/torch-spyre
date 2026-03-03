@@ -64,7 +64,7 @@ class SpyreAsyncCompile:
                 inputs.append(
                     {
                         "name": _argument_names[index],
-                        "scale": ks.scales[index],
+                        "scale": ts.scales,
                         "device_layout": ts.device_layout,
                         "host_size": ts.host_size,
                         "lx_addr": lx_addr,
@@ -75,7 +75,7 @@ class SpyreAsyncCompile:
                 outputs.append(
                     {
                         "name": _argument_names[index],
-                        "scale": ks.scales[index],
+                        "scale": ts.scales,
                         "device_layout": ts.device_layout,
                         "host_size": ts.host_size,
                         "lx_addr": lx_addr,
