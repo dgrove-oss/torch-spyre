@@ -64,7 +64,7 @@ class SpyreAsyncCompile:
                 inputs.append(
                     {
                         "name": _argument_names[index],
-                        "scale": ts.scales,
+                        "scale": ts.is_to_dim,
                         "device_layout": ts.device_layout,
                         "host_size": ts.host_size,
                         "lx_addr": lx_addr,
@@ -75,7 +75,7 @@ class SpyreAsyncCompile:
                 outputs.append(
                     {
                         "name": _argument_names[index],
-                        "scale": ts.scales,
+                        "scale": ts.is_to_dim,
                         "device_layout": ts.device_layout,
                         "host_size": ts.host_size,
                         "lx_addr": lx_addr,
@@ -86,7 +86,7 @@ class SpyreAsyncCompile:
             "name": kernel_name,
             "reduction": ks.is_reduction,
             "op": ks.op,
-            "dimensions": ks.dimensions,
+            "dimensions": ks.iteration_space,
             "inputs": inputs,
             "outputs": outputs,
         }

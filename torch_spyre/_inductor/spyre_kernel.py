@@ -349,8 +349,8 @@ def create_tensor_arg(
         arg_index,
         tensor.layout.dtype,
         tensor.layout.size,
-        tensor.layout.allocation,
         scales,
+        tensor.layout.allocation,
         tensor.layout.device_layout,
     )
 
@@ -520,16 +520,16 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 ]
                 # Reorder scale of the output  to implement transpositions
                 (
-                    ks.args[-1].scales[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                    ks.args[-1].scales[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    ks.args[-1].is_to_dim[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    ks.args[-1].is_to_dim[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
                 ) = (
-                    ks.args[-1].scales[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                    ks.args[-1].scales[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    ks.args[-1].is_to_dim[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    ks.args[-1].is_to_dim[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
                 )
 
             # TODO(aviros): Remove this piece of code when real relayout is implemented
             if generic_relayout:
-                ks.dimensions.reverse()
+                ks.iteration_space.reverse()
                 ks.op_info["transposed_dims"] = [0, 1]
 
             self.kernel_specs.append(ks)
@@ -723,7 +723,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             else:
                 logger.debug(
                     f"kernel_spec: {ks.op}, is_reduction={ks.is_reduction}, "
-                    f"dimensions={ks.dimensions}, op_info={ks.op_info}"
+                    f"iteration_space={ks.iteration_space}, op_info={ks.op_info}"
                 )
 
         if isinstance(ks, UnimplementedOp):
@@ -733,7 +733,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             with buf.indent():
                 buf.writeline(f"op='{ks.op}',")
                 buf.writeline(f"is_reduction={ks.is_reduction},")
-                buf.writeline(f"dimensions={ks.dimensions!r},")
+                buf.writeline(f"iteration_space={ks.iteration_space!r},")
                 buf.writeline(f"op_info={ks.op_info!r},")
                 buf.writeline("args=[")
                 with buf.indent():
