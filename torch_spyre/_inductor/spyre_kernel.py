@@ -520,11 +520,11 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 ]
                 # Reorder scale of the output  to implement transpositions
                 (
-                    ks.args[-1].is_to_hs_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                    ks.args[-1].is_to_hs_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
                 ) = (
-                    ks.args[-1].is_to_hs_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                    ks.args[-1].is_to_hs_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
                 )
 
             # TODO(aviros): Remove this piece of code when real relayout is implemented
