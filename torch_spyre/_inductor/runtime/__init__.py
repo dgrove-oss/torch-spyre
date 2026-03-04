@@ -29,12 +29,12 @@ class TensorArg:
         dtype: The PyTorch (host) dtype of the tensor elements.
         host_size: The PyTorch (host) size of the Tensor.
         allocation: If present, the offset in scratchpad memory assigned to the Tensor.
-        is_to_dim: A mapping between the op's iteration_space and the dimensions of the Tensor's host_size.
-                len(is_to_dim) == len(ks.iteration_space).
-                is_to_dim[d] is an integer that is interpreted as follows:
-                    -1 indicates the the d-th dimension of the iteration space is a broadcast or reduction dimension for the Tensor.
-                    A non-negative value is the dimension of host_size that corresponds to the d-th dimension of the iteration_space.
-                    If is_to_dim[d] is non-negative, then there is an invariant that ks.iteration_space[d] == host_size[is_to_dim[d]].
+        is_to_hs_map: A mapping between the op's iteration_space and the dimensions of the Tensor's host_size.
+                len(is_to_hs_map) == len(ks.iteration_space).
+                is_to_hs_map[d] is an integer that is interpreted as follows:
+                    -1 indicates the the d-th dimension of ks.iteration_space is a broadcast or reduction dimension for this Tensor.
+                    A non-negative value is the dimension of host_size that corresponds to the d-th dimension of ks.iteration_space.
+                    For non-negative values it must be true that ks.iteration_space[d] == host_size[is_to_dim[d]].
         device_layout: The SpyreTensorLayout describe the on device shape of the Tensor.
     """
 
@@ -42,7 +42,7 @@ class TensorArg:
     arg_index: int
     dtype: torch.dtype
     host_size: torch.Size
-    is_to_dim: list[int]
+    is_to_hs_map: list[int]
     allocation: Any
     device_layout: SpyreTensorLayout
 
