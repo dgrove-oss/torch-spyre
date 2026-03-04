@@ -28,13 +28,13 @@ class TensorArg:
         arg_index: The index of the Tensor in the argument array of the Kernel.
         dtype: The PyTorch (host) dtype of the tensor elements.
         host_size: The PyTorch (host) size of the Tensor.
-        allocation: If present, the offset in scratchpad memory assigned to the Tensor.
-        it_dim_map: A mapping between the op's iteration_space and the host dimensions of the Tensor.
+        it_dim_map: A mapping between the op's iteration_space and the PyTorch (host) dimensions of the Tensor.
             it_dim_map[d] is an integer that is interpreted as follows:
                 -1 indicates the the d-th dimension of ks.iteration_space is a broadcast or reduction dimension for this Tensor.
-                A non-negative value is the dimension of the Tensor that corresponds to the d-th dimension of ks.iteration_space.
+                A non-negative value is the PyTorch (host) dimension of the Tensor that corresponds to the d-th dimension of ks.iteration_space.
                 For non-negative values it must be true that ks.iteration_space[d] == host_size[it_dim_map[d]].
-        device_layout: The SpyreTensorLayout describe the on device shape of the Tensor.
+        allocation: If present, the offset in scratchpad memory assigned to the Tensor.
+        device_layout: The SpyreTensorLayout describe the device shape of the Tensor.
     """
 
     is_input: bool
