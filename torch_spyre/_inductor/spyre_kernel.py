@@ -32,7 +32,7 @@ from torch._inductor.codegen.simd import SIMDKernel
 from torch._inductor.utils import sympy_subs
 from torch._inductor.virtualized import StoreMode, V
 
-from .runtime import ConstantArg, KernelSpec, TensorArg
+from .runtime import ConstantArg, OpSpec, TensorArg
 from .constants import (
     MATMUL_REDUCTION_OP,
     SPYRE_FP32_OPS,
@@ -355,13 +355,13 @@ def create_tensor_arg(
     )
 
 
-def create_kernel_spec(
+def create_op_spec(
     op: str,
     is_reduction: bool,
     dims: list[DimensionInfo],
     args: Sequence[TensorArg | ConstantArg],
     op_info: dict[str, Any],
-) -> KernelSpec:
+) -> OpSpec:
     for arg in args:
         if arg.dtype == torch.float32 and op not in SPYRE_FP32_OPS:
             raise Unsupported(f"{op} on {arg.dtype} dtype")
@@ -372,7 +372,7 @@ def create_kernel_spec(
             torch.int64,
         ]:
             raise Unsupported(f"operations on {arg.dtype} dtype")
-    return KernelSpec(op, is_reduction, [d.numel for d in dims], args, op_info)
+    return OpSpec(op, is_reduction, [d.numel for d in dims], args, op_info)
 
 
 class SpyreKernel(SIMDKernel[CSEVariable]):
@@ -384,7 +384,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         **kwargs,
     ) -> None:
         super().__init__(tiling, **kwargs)
-        self.kernel_specs: list[KernelSpec | UnimplementedOp] = []
+        self.op_specs: list[OpSpec | UnimplementedOp] = []
 
     def __enter__(self) -> Self:
         super().__enter__()
@@ -443,7 +443,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             )
 
         if isinstance(value, UnimplementedOp):
-            self.kernel_specs.append(value)
+            self.op_specs.append(value)
         elif isinstance(value, PointwiseOp):
             # Pointwise compute ops are defined by the output's index
             di = self.derive_dim_info(dst)
@@ -459,9 +459,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                     raise Unsupported(f"unexpected argument {input} to {value.op}")
             args.append(create_tensor_arg(False, actuals.index(real_dst_name), dst, di))
             op_info.update(value.op_info)
-            self.kernel_specs.append(
-                create_kernel_spec(value.op, False, di, args, op_info)
-            )
+            self.op_specs.append(create_op_spec(value.op, False, di, args, op_info))
         elif isinstance(value, TensorAccess):
             # Reshapes, transposes, and other dataops
             in_di = self.derive_dim_info(value)
@@ -513,26 +511,26 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 # Unsupported data operation on ConstantArg
                 raise Unsupported(f"Data operation on {type(args[0])}")
 
-            ks = create_kernel_spec(op, False, in_di, args, op_info)
+            op_spec = create_op_spec(op, False, in_di, args, op_info)
             if in_di != out_di:
-                ks.op_info["transposed_dims"] = [
+                op_spec.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d].var != out_di[d].var
                 ]
                 # Reorder scale of the output  to implement transpositions
                 (
-                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
                 ) = (
-                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                    ks.args[-1].it_dim_map[ks.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
+                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
                 )
 
             # TODO(aviros): Remove this piece of code when real relayout is implemented
             if generic_relayout:
-                ks.iteration_space.reverse()
-                ks.op_info["transposed_dims"] = [0, 1]
+                op_spec.iteration_space.reverse()
+                op_spec.op_info["transposed_dims"] = [0, 1]
 
-            self.kernel_specs.append(ks)
+            self.op_specs.append(op_spec)
         else:
             raise Unsupported(f"store value of unexpected type {type(value)}")
 
@@ -553,7 +551,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             V.graph.removed_buffers.add(name)
 
         if isinstance(value, UnimplementedOp):
-            self.kernel_specs.append(value)
+            self.op_specs.append(value)
             return
 
         op_info = {}
@@ -586,12 +584,12 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 di = [di_x[0], di_x[1], di_y[1]]
             elif len(di_x) == 1 and len(di_y) == 2:
                 di = [di_x[0], DimensionInfo(wildcard_symbol(1), 1), di_y[1]]
-                # TODO:  The KernelSpec we generate is correct, but the SDSC we generate
+                # TODO:  The OpSpec we generate is correct, but the SDSC we generate
                 # will not compute the correct result.  Raise Unsupported to make this explicit.
                 raise Unsupported(f"matmul requires padding support: {value.arguments}")
             elif len(di_x) == 2 and len(di_y) == 1:
                 di = [di_x[0], di_x[1], DimensionInfo(wildcard_symbol(1), 1)]
-                # TODO:  The KernelSpec we generate is correct, but the SDSC we generate
+                # TODO:  The OpSpec we generate is correct, but the SDSC we generate
                 # will not compute the correct result.  Raise Unsupported to make this explicit.
                 raise Unsupported(f"matmul requires padding support: {value.arguments}")
             else:
@@ -601,9 +599,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 create_tensor_arg(True, actuals.index(y.name), y, di),
                 create_tensor_arg(False, actuals.index(real_dst_name), dst, di),
             ]
-            self.kernel_specs.append(
-                create_kernel_spec(value.op, True, di, args, op_info)
-            )
+            self.op_specs.append(create_op_spec(value.op, True, di, args, op_info))
         elif value.op == BATCH_MATMUL_OP:
             if (
                 len(value.arguments) != 2
@@ -677,9 +673,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 create_tensor_arg(True, actuals.index(y.name), y, di),
                 create_tensor_arg(False, actuals.index(real_dst_name), dst, di),
             ]
-            self.kernel_specs.append(
-                create_kernel_spec(value.op, True, di, args, op_info)
-            )
+            self.op_specs.append(create_op_spec(value.op, True, di, args, op_info))
         else:
             # All other reductions have exactly one input which is a tensor
             if (not len(value.arguments) == 1) or (
@@ -692,9 +686,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 create_tensor_arg(True, actuals.index(x.name), x, di),
                 create_tensor_arg(False, actuals.index(real_dst_name), dst, di),
             ]
-            self.kernel_specs.append(
-                create_kernel_spec(value.op, True, di, args, op_info)
-            )
+            self.op_specs.append(create_op_spec(value.op, True, di, args, op_info))
 
     def derive_dim_info(self, access: TensorAccess) -> list[DimensionInfo]:
         """
@@ -711,32 +703,32 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
             return [DimensionInfo(wildcard_symbol(0), 1)]
 
     def codegen_kernel(self):
-        """Codegen the body of this kernel by pretty printing its list of KernelSpecs"""
+        """Codegen the body of this kernel by pretty printing its list of OpSpecs"""
         buf = IndentedBuffer()
         buf.writeline("[")
         with buf.indent():
-            for ks in self.kernel_specs:
+            for op_spec in self.op_specs:
                 if logger.isEnabledFor(logging.DEBUG):
-                    if isinstance(ks, UnimplementedOp):
-                        logger.debug(f"kernel_spec: UnimplementedOp({ks.op})")
+                    if isinstance(op_spec, UnimplementedOp):
+                        logger.debug(f"op_spec: UnimplementedOp({op_spec.op})")
                     else:
                         logger.debug(
-                            f"kernel_spec: {ks.op}, is_reduction={ks.is_reduction}, "
-                            f"iteration_space={ks.iteration_space}, op_info={ks.op_info}"
+                            f"op_spec: {op_spec.op}, is_reduction={op_spec.is_reduction}, "
+                            f"iteration_space={op_spec.iteration_space}, op_info={op_spec.op_info}"
                         )
 
-                if isinstance(ks, UnimplementedOp):
-                    buf.writeline(f"UnimplementedOp(op='{ks.op}')")
+                if isinstance(op_spec, UnimplementedOp):
+                    buf.writeline(f"UnimplementedOp(op='{op_spec.op}')")
                 else:
-                    buf.writeline("KernelSpec(")
+                    buf.writeline("OpSpec(")
                     with buf.indent():
-                        buf.writeline(f"op='{ks.op}',")
-                        buf.writeline(f"is_reduction={ks.is_reduction},")
-                        buf.writeline(f"iteration_space={ks.iteration_space!r},")
-                        buf.writeline(f"op_info={ks.op_info!r},")
+                        buf.writeline(f"op='{op_spec.op}',")
+                        buf.writeline(f"is_reduction={op_spec.is_reduction},")
+                        buf.writeline(f"iteration_space={op_spec.iteration_space!r},")
+                        buf.writeline(f"op_info={op_spec.op_info!r},")
                         buf.writeline("args=[")
                         with buf.indent():
-                            for arg in ks.args:
+                            for arg in op_spec.args:
                                 buf.writeline(f"{arg!r},")
                         buf.writeline("]")
                     buf.writeline("),")

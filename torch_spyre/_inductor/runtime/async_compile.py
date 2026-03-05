@@ -23,7 +23,7 @@ from torch_spyre._C import convert_artifacts
 from torch_spyre._inductor.codegen.superdsc import generate_sdsc
 from torch_spyre._inductor.constants import SEGMENT_OFFSETS
 from torch_spyre._inductor.logging_utils import get_inductor_logger
-from . import KernelSpec, ConstantArg, UnimplementedOp
+from . import OpSpec, ConstantArg, UnimplementedOp
 from .kernel_runner import (
     SpyreSDSCKernelRunner,
     SpyreUnimplementedRunner,
@@ -45,8 +45,8 @@ class SpyreAsyncCompile:
     def __init__(self) -> None:
         pass
 
-    def sdsc(self, kernel_name: str, specs: list[Union[KernelSpec | UnimplementedOp]]):
-        # 1. Generate SDSC.json for each KernelSpec
+    def sdsc(self, kernel_name: str, specs: list[Union[OpSpec | UnimplementedOp]]):
+        # 1. Generate SDSC.json for each OpSpec
         sdsc_dirs = []
         arg_mappings = []
         for ks in specs:

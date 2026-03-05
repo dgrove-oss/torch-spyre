@@ -21,7 +21,7 @@ from torch_spyre._C import SpyreTensorLayout
 @dataclasses.dataclass
 class TensorArg:
     """
-    A class representing a Tensor argument to a KernelSpec
+    A class representing a Tensor argument to an OpSpec
 
     Attributes:
         is_input: Is the Tensor used as an input to the operation?
@@ -49,7 +49,7 @@ class TensorArg:
 @dataclasses.dataclass
 class ConstantArg:
     """
-    A class representing a Constant argument to a KernelSpec
+    A class representing a Constant argument to an OpSpec
 
     Attributes:
         value: The value of the constant.
@@ -61,7 +61,7 @@ class ConstantArg:
 
 
 @dataclasses.dataclass
-class KernelSpec:
+class OpSpec:
     """
     A class representing a single operation to perform on the device
 
