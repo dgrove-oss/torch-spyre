@@ -151,7 +151,7 @@ def is_wildcard(s: Symbol) -> bool:
     return s.name.startswith("*_")
 
 
-def map_dims_to_vars(layout: FixedLayout, index: Expr) -> dict[int, Symbol]:
+def map_dims_to_vars(name: str, layout: FixedLayout, index: Expr) -> dict[int, Symbol]:
     """
     Construct a mapping from the dimensions of layout
     to the free variables of index that correspond to them.
@@ -160,10 +160,33 @@ def map_dims_to_vars(layout: FixedLayout, index: Expr) -> dict[int, Symbol]:
     This works by reversing the algorithm used by torch._inductor.ir. _fixed_indexer to build index.
     """
     result = {}
+    adj_stride = list(layout.stride)
+    if (
+        getattr(V.graph, "partial_view_info", None)
+        and name in V.graph.partial_view_info
+    ):
+        view_op_list = V.graph.partial_view_info[name]
+        for view_op_info in view_op_list:
+            if view_op_info["type"] == "permute":
+                dims = view_op_info["dims"]
+                ndims = len(dims)
+                inv_perm = [0] * ndims
+                for new_pos, old_pos in enumerate(dims):
+                    inv_perm[old_pos] = new_pos
+                adj_stride = [adj_stride[inv_perm[d]] for d in range(ndims)]
+            elif view_op_info["type"] == "transpose":
+                dim0 = view_op_info["dim0"]
+                dim1 = view_op_info["dim1"]
+                adj_stride[dim1], adj_stride[dim1] = adj_stride[dim1], adj_stride[dim0]
+            else:
+                raise Unsupported(
+                    f"TODO: map_dims_to_vars for view_op {view_op_info['type']}"
+                )
+
     for sym in index.free_symbols:
         stride_val = sympy_subs(index, {sym: 1}) - sympy_subs(index, {sym: 0})
-        if stride_val in layout.stride:
-            idx = layout.stride.index(stride_val)
+        if stride_val in adj_stride:
+            idx = adj_stride.index(stride_val)
             result[idx] = sym
 
     for d in range(len(layout.size)):

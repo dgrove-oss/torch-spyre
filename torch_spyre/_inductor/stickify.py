@@ -204,7 +204,7 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         # Stick compatability check.
         # All stick dimensions not being broadcast must correspond to the same variable in the iteration space.
         input_dim_to_vars = [
-            map_dims_to_vars(arg.layout, arg.dep.index) for arg in args
+            map_dims_to_vars(arg.dep.name, arg.layout, arg.dep.index) for arg in args
         ]
         stick_vars = set()
         for arg, arg_dim_map in zip(args, input_dim_to_vars):
@@ -261,7 +261,8 @@ def pointwise_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
 def reduction_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLayout:
     red: Reduction = n.node.data
     output: FixedLayout = n.node.get_layout()
-    output_dims = map_dims_to_vars(output, list(n.read_writes.writes)[0].index)
+    # passing  "" because we don't want to apply views to the output..they happen on reads, not writes
+    output_dims = map_dims_to_vars("", output, list(n.read_writes.writes)[0].index)
     if red.reduction_type == MATMUL_REDUCTION_OP:
         x_stl = args[0].layout.device_layout
         y_stl = args[1].layout.device_layout
@@ -316,7 +317,7 @@ def reduction_layout(n: SchedulerNode, args: list[SchedNodeArg]) -> FixedTiledLa
         x = args[0]
         x_stl = x.layout.device_layout
         out_dim_order = derive_dim_order(x_stl, len(output.size))
-        in_dims = map_dims_to_vars(x.layout, x.dep.index)
+        in_dims = map_dims_to_vars(x.dep.name, x.layout, x.dep.index)
         stick_dim_var = in_dims.get(x_stl.host_stick_dim(), None)
         if stick_dim_var not in output_dims.values():
             out_dim_order = out_dim_order + [-1]

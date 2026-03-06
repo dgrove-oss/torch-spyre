@@ -334,7 +334,7 @@ def analyze_tensor_access(
     """
     Return the scale implied by the given iteration space and indexing expression
     """
-    dim_map = map_dims_to_vars(access.layout, access.index)
+    dim_map = map_dims_to_vars(access.name, access.layout, access.index)
     var_map = {v: k for k, v in dim_map.items()}
 
     # Special case: single dimension of size 1 is not elided by inductor
@@ -716,7 +716,7 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
         """
         var_ranges = self.var_ranges()
         if var_ranges:
-            dim_map = map_dims_to_vars(access.layout, access.index)
+            dim_map = map_dims_to_vars(access.name, access.layout, access.index)
             return [
                 DimensionInfo(dim_map[v], int(var_ranges.get(dim_map[v], 1)))
                 for v in sorted(dim_map)
