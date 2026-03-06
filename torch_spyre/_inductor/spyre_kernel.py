@@ -539,19 +539,11 @@ class SpyreKernel(SIMDKernel[CSEVariable]):
                 # Unsupported data operation on ConstantArg
                 raise Unsupported(f"Data operation on {type(args[0])}")
 
-            op_spec = create_op_spec(op, False, in_di, args, op_info)
+            op_spec = create_op_spec(op, False, out_di, args, op_info)
             if in_di != out_di:
                 op_spec.op_info["transposed_dims"] = [
                     d for d in range(len(in_di)) if in_di[d].var != out_di[d].var
                 ]
-                # Reorder scale of the output  to implement transpositions
-                (
-                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                ) = (
-                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][1]],  # type: ignore[union-attr]
-                    op_spec.args[-1].it_dim_map[op_spec.op_info["transposed_dims"][0]],  # type: ignore[union-attr]
-                )
 
             # TODO(aviros): Remove this piece of code when real relayout is implemented
             if generic_relayout:
