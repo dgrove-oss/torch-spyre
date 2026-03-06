@@ -326,6 +326,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ]
             ),
         },
+        ("test_transpose_add_2d_cpu", "test_transpose_add_2d_cpu"): {
+            "param_sets": make_param_dict(
+                [
+                    ((128, 64), (128, 64)),
+                ]
+            ),
+        },
         ("test_transpose_3d_cpu", "test_transpose_3d_cpu"): {
             "param_sets": {
                 "dim_0_2": (
@@ -939,6 +946,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             return z
 
         compare(fn, x)
+
+    def test_transpose_add_2d_cpu(self, x, y):
+        compare_with_cpu(lambda x, y: x.t() + y.t(), x, y)
 
     def test_transpose_2d_cpu(self, x):
         compare_with_cpu(lambda x: x.t().contiguous(), x)
