@@ -348,7 +348,7 @@ class SpyreKernel(Kernel[CSEVariable]):
 
         it_space = iteration_space(self.current_node)
         it_space_extended = {
-            k: (v, core_division.get(v, 1)) for k, v in it_space.items()
+            k: (v, core_division.get(k, 1)) for k, v in it_space.items()
         }
 
         return OpSpec(
