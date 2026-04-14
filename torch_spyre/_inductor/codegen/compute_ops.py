@@ -214,6 +214,13 @@ def generate_sdsc(sdsc_spec):
         }
         for c in range(sdsc_spec.num_cores)
     }
+    symbols = []
+
+    def offset_as_symbol(s):
+        if s not in symbols:
+            symbols.append(s)
+        return -(symbols.index(s) + 1)
+
     return {
         sdsc_spec.opfunc: {
             "sdscFoldProps_": [{"factor_": 1, "label_": "time"}],
@@ -317,13 +324,15 @@ def generate_sdsc(sdsc_spec):
                                     ],
                                     "data_": {
                                         f"[{c}, 0, 0]": str(
-                                            tensor.start_address
-                                            + core_idx_to_slice_offset(
-                                                tensor,
-                                                core_id_to_wk_slice[str(c)],
-                                                sdsc_spec.work_slices,
+                                            offset_as_symbol(
+                                                tensor.start_address
+                                                + core_idx_to_slice_offset(
+                                                    tensor,
+                                                    core_id_to_wk_slice[str(c)],
+                                                    sdsc_spec.work_slices,
+                                                )
+                                                * num_bytes(tensor.data_format)
                                             )
-                                            * num_bytes(tensor.data_format)
                                         )
                                         for c in range(sdsc_spec.num_cores)
                                         #  lx addr is baked into tensor.start_addr already
@@ -417,4 +426,4 @@ def generate_sdsc(sdsc_spec):
                 }
             ],
         }
-    }
+    }, symbols

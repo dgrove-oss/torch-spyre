@@ -29,11 +29,11 @@ def generate_bundle(kernel_name: str, output_dir: str, specs: list[OpSpec]):
     # 1. Generate SDSC.json for each OpSpec
     sdscs_json = []
     for ks in specs:
-        sdsc_json = compile_op_spec(kernel_name, ks)
-        sdscs_json.append(sdsc_json)
+        sdsc_json, symbols = compile_op_spec(kernel_name, ks)
+        sdscs_json.append((sdsc_json, symbols))
 
     # Write JSON SDSCs to file system
-    for idx, sdsc_json in enumerate(sdscs_json):
+    for idx, (sdsc_json, _) in enumerate(sdscs_json):
         with open(os.path.join(output_dir, f"sdsc_{idx}.json"), "w") as file:
             logger.info(f"Generating {file.name}")
             json.dump(sdsc_json, file, indent=2)
@@ -43,11 +43,22 @@ def generate_bundle(kernel_name: str, output_dir: str, specs: list[OpSpec]):
         logger.info(f"Generating {file.name}")
         file.write("module {\n")
         file.write("\tfunc.func @sdsc_bundle() {\n")
-        for i in range(len(sdscs_json)):
+        for idx, (_, symbols) in enumerate(sdscs_json):
+            for sym_idx, symbol in enumerate(symbols):
+                file.write(
+                    f"\t\t%sym_{idx}_{sym_idx + 1} = arith.constant {symbol} : index\n"
+                )
             file.write(
-                '\t\tsdscbundle.sdsc_execute () {sdsc_filename="sdsc_'
-                + f"{i}"
-                + '.json"}\n'
+                "\t\tsdscbundle.sdsc_execute ("
+                + ", ".join(
+                    [f"sym_{idx}_{sym_idx + 1}" for sym_idx in range(len(symbols))]
+                )
+                + ') {sdsc_filename="sdsc_'
+                + f"{idx}"
+                + '.json", '
+                + '"symbol_ids"=['
+                + ", ".join([f"{-(sym_idx + 1)}" for sym_idx in range(len(symbols))])
+                + "]}\n"
             )
         file.write("\t\treturn\n")
         file.write("\t}\n")
