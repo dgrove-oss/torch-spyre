@@ -205,7 +205,7 @@ def gen_coord_info_value(
     )
 
 
-def generate_sdsc(sdsc_spec):
+def generate_sdsc(sdsc_spec, symbols: list[int], symbol_id_offset: int = 0):
     out_idx = len(sdsc_spec.args) - 1
     core_id_to_wk_slice = {
         str(c): {
@@ -214,12 +214,17 @@ def generate_sdsc(sdsc_spec):
         }
         for c in range(sdsc_spec.num_cores)
     }
-    symbols = []
+
+    # local_symbols maps offset value -> globally-unique negative symbol id.
+    # symbol_id_offset ensures ids are unique across all SDSCs in the bundle.
+    local_symbols: dict[int, int] = {}
 
     def offset_as_symbol(s):
-        if s not in symbols:
-            symbols.append(s)
-        return -(symbols.index(s) + 1)
+        if s not in local_symbols:
+            if s not in symbols:
+                symbols.append(s)
+            local_symbols[s] = -(symbol_id_offset + len(local_symbols) + 1)
+        return local_symbols[s]
 
     return {
         sdsc_spec.opfunc: {
@@ -337,6 +342,7 @@ def generate_sdsc(sdsc_spec):
                                         for c in range(sdsc_spec.num_cores)
                                         #  lx addr is baked into tensor.start_addr already
                                     },
+                                    "isStartAddrSymbolic_": 1,
                                 },
                                 **(
                                     {
@@ -426,4 +432,4 @@ def generate_sdsc(sdsc_spec):
                 }
             ],
         }
-    }, symbols
+    }, list(local_symbols.keys())
