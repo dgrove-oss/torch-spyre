@@ -51,7 +51,7 @@ def generate_bundle(kernel_name: str, output_dir: str, specs: list[OpSpec]):
             file.write(
                 "\t\tsdscbundle.sdsc_execute ("
                 + ", ".join(
-                    [f"sym_{idx}_{sym_idx + 1}" for sym_idx in range(len(symbols))]
+                    [f"%sym_{idx}_{sym_idx + 1}" for sym_idx in range(len(symbols))]
                 )
                 + ') {sdsc_filename="sdsc_'
                 + f"{idx}"
