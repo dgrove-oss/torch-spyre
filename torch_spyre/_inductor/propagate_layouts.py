@@ -817,11 +817,20 @@ def _multi_arg_pointwise_layouts(
         output_ea = ElementArrangement.STANDARD
 
     ind_names, _, ind_sizes = indirect_info_from_op(op)
+    # arg.layouts is a set of *candidate* layouts; some candidates can map
+    # the device stick to a strided/unrepresentable host access (e.g. 2*d0
+    # from a coarse-tile fill buffer whose other candidates are fine). This
+    # is an enumeration of candidates, not a committed layout, so skip the
+    # unrepresentable ones via try_device_coordinates instead of letting
+    # device_coordinates abort the whole compile. The committed-layout
+    # selection below already filters on is_stick_expr_offset_free.
     stick_exprs = {
-        device_coordinates(stl, arg.dep, ind_sizes)[-1]
+        coords[-1]
         for arg in args
         for stl in arg.layouts
         if arg.dep.name not in ind_names
+        and (coords := try_device_coordinates(stl, arg.dep, ind_sizes))
+        is not None
     }
 
     # If the indexing and device element size are identical
@@ -857,8 +866,14 @@ def _multi_arg_pointwise_layouts(
             in_stl = SpyreTensorLayout(
                 c_in_size, c_in_stride, output.dtype, projected_dim_order, output_ea
             )
-            coord = device_coordinates(in_stl, arg.dep, ind_sizes)
-            if not is_stick_expr_offset_free(coord[-1], stick_size):
+            # Enumerating candidate dim_orders: an unrepresentable stick
+            # (e.g. 2*d0) means this candidate is unsupported, not that the
+            # whole compile should abort -- so use try_device_coordinates and
+            # treat None like a non-offset-free stick.
+            coord = try_device_coordinates(in_stl, arg.dep, ind_sizes)
+            if coord is None or not is_stick_expr_offset_free(
+                coord[-1], stick_size
+            ):
                 return False
         return True
 
