@@ -884,12 +884,28 @@ def _multi_arg_pointwise_layouts(
     elif not stick_exprs:
         _try_stick_dim(-1)
     else:
+        # A stick_expr of 0 (no free symbols) comes from a broadcast operand
+        # whose device stick maps to a size-1 host axis — it has no real dim
+        # to preserve. matching_dim (via _pick_stick_dim) already returns -1
+        # for such exprs, but that -1 is also the deliberate sentinel used by
+        # the `not stick_exprs` branch above to request a genuine sparse-stick
+        # layout (dim_order's trailing -1 protocol, see spyre_tensor_impl.cpp
+        # get_generic_stick_layout). Passing the broadcast operand's trivial 0
+        # through to _try_stick_dim would conflate the two, producing a bogus
+        # sparse-stick candidate for what is really a dense op. Drop
+        # zero-free-symbol exprs here so only genuine candidate stick dims
+        # reach _try_stick_dim.
         offset_free_stick_exprs = {
-            e for e in stick_exprs if is_stick_expr_offset_free(e, stick_size)
+            e
+            for e in stick_exprs
+            if e.free_symbols and is_stick_expr_offset_free(e, stick_size)
         }
-        # Sort stick exprs for determinism
-        for stick_expr in sorted(offset_free_stick_exprs, key=iter_var_id):
-            _try_stick_dim(_pick_stick_dim(stick_expr, out_coords))
+        if not offset_free_stick_exprs:
+            _try_stick_dim(-1)
+        else:
+            # Sort stick exprs for determinism
+            for stick_expr in sorted(offset_free_stick_exprs, key=iter_var_id):
+                _try_stick_dim(_pick_stick_dim(stick_expr, out_coords))
 
     # Always scan all dims so that dims absent from any input stick expression
     # (e.g. the outer broadcast dim) are also offered as candidates. Deduplicate
