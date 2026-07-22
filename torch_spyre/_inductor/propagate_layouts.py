@@ -1381,8 +1381,14 @@ def propagate_spyre_tensor_layouts(
                     # Exclude the running accumulator itself (dep.name == target_name)
                     # from the layout constraint: it IS the output, not a new input.
                     new_value_args = [a for a in all_args if a.dep.name != target_name]
-                    if not new_value_args:
-                        # No real inputs — fall back to unconstrained candidates.
+                    if not new_value_args or op.get_name().startswith(
+                        "coarse_tile_copy"
+                    ):
+                        # No real inputs, or a coarse_tile Case-1 scatter copy: pin
+                        # the full accumulator buffer to its OWN standard stick
+                        # candidates and let AllSameNode restickify the copy's input
+                        # to match, so the outside consumer reads the same layout the
+                        # copy wrote (else the tiled input dictates a mismatched layout).
                         candidates = _all_constant_layouts(target_buf)
                         target_buf.layouts = candidates
                         op.layouts = candidates
