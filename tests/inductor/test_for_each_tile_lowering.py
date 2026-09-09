@@ -143,6 +143,14 @@ class TestSpliceWhileLoops(unittest.TestCase):
             self.assertFalse(
                 any(isinstance(op, ir.WhileLoop) for op in graph.operations)
             )
+            tiled_ops = [
+                op for op in graph.operations if getattr(op, "loop_info", None)
+            ]
+            self.assertTrue(
+                tiled_ops, "expected at least one op with loop_info stamped"
+            )
+            for op in tiled_ops:
+                self.assertTrue(op.dim_hints, f"{op} missing synthesized dim_hints")
 
 
 class TestTryProveForEachTile(unittest.TestCase):
