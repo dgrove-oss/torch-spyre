@@ -67,6 +67,84 @@ def _find_while_loop_ir_op(fn, args):
     return while_ops[0]
 
 
+class TestSpliceWhileLoops(unittest.TestCase):
+    def _run_graph(self, fn, args):
+        """Lower fn(*args) through a fresh GraphLowering and return it.
+
+        Mirrors _find_while_loop_ir_op's fake_mode/shape_env recovery above:
+        GraphLowering.run() requires an active V.fake_mode with a real
+        ShapeEnv (WhileLoop.create's unbacked-symbol renaming touches
+        V.fake_mode.shape_env.unbacked_renamings unconditionally), so the
+        fake_mode the original torch.compile trace attached to this graph
+        module's own node.meta["val"] fake tensors is reused here.
+        """
+        from torch._inductor.graph import GraphLowering
+
+        _out, gm = capture_post_grad_while_loop(fn, args)
+
+        fake_mode = None
+        for node in gm.graph.nodes:
+            val = node.meta.get("val") if hasattr(node, "meta") else None
+            candidate = getattr(val, "fake_mode", None)
+            if candidate is not None:
+                fake_mode = candidate
+                break
+        assert fake_mode is not None, "could not recover a fake_mode from gm node.meta"
+
+        graph = GraphLowering(
+            gm, example_inputs=list(args), shape_env=fake_mode.shape_env
+        )
+        with V.set_graph_handler(graph), V.set_fake_mode(fake_mode):
+            graph.run(*args)
+        return graph
+
+    def test_map_mode_group_gets_loop_info(self):
+        from torch._inductor import ir
+        from torch._inductor.virtualized import V
+
+        from torch_spyre._inductor.wsr.for_each_tile_lowering import (
+            splice_while_loops,
+        )
+
+        (X, Y), _ref = matmul_inputs()
+        graph = self._run_graph(split_m_fn, (X, Y))
+        with V.set_graph_handler(graph):
+            self.assertTrue(
+                any(isinstance(op, ir.WhileLoop) for op in graph.operations)
+            )
+
+            splice_while_loops(graph)
+
+            self.assertFalse(
+                any(isinstance(op, ir.WhileLoop) for op in graph.operations)
+            )
+            tiled_ops = [
+                op for op in graph.operations if getattr(op, "loop_info", None)
+            ]
+            self.assertTrue(
+                tiled_ops, "expected at least one op with loop_info stamped"
+            )
+            for op in tiled_ops:
+                self.assertTrue(op.dim_hints, f"{op} missing synthesized dim_hints")
+
+    def test_carry_mode_group_gets_loop_info(self):
+        from torch._inductor import ir
+        from torch._inductor.virtualized import V
+
+        from torch_spyre._inductor.wsr.for_each_tile_lowering import (
+            splice_while_loops,
+        )
+
+        (X, Y), _ref = matmul_inputs()
+        graph = self._run_graph(split_k_fn, (X, Y))
+        with V.set_graph_handler(graph):
+            splice_while_loops(graph)
+
+            self.assertFalse(
+                any(isinstance(op, ir.WhileLoop) for op in graph.operations)
+            )
+
+
 class TestTryProveForEachTile(unittest.TestCase):
     def test_map_mode_accepted_with_trip_count(self):
         (X, Y), _ref = matmul_inputs()
