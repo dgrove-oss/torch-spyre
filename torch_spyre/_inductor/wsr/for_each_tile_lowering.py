@@ -249,20 +249,30 @@ def _synthesize_dim_hints_for_group(
 
     loop_var is this level's own induction variable -- there is exactly one
     per nesting level, unlike a user spyre_hint() scope which can cover many
-    ops arbitrarily. is_reduction/dim_names/which dim is tiled come from
-    each op's own read/write shape: an op whose write shape shrank relative
-    to the pre-splice body is being reduced into (is_reduction=True); every
-    other tiled op is treated as a plain per-tile map write.
+    ops arbitrarily.
+
+    ``is_reduction`` here is ADVISORY ONLY, unlike on an ordinary
+    ``spyre_hint()`` DimHint where it selects the lookup channel. One
+    synthesized hint covers the whole level, so it cannot say, per op,
+    whether the level lands on an output dim or a reduction dim OF THAT OP --
+    and the two fixtures disagree for structurally identical ``aten.mm``
+    bodies: ``split_m_fn``'s matmul reduces over K but the loop tiles M (an
+    output dim), while ``split_k_fn``'s reduces over K and the loop tiles K
+    itself. ``coarse_tile.py``'s ``_hint_ranges_pos`` therefore resolves the
+    channel per op from where ``loop_var`` actually appears, and ignores this
+    field for a WhileLoop-splice hint (identified by ``loop_var_range`` being
+    non-None). It is still populated from ``reduction_type`` so the hint
+    reads sensibly in logs and so any future consumer that keys off it sees
+    the op's own reduction-ness rather than a hard-coded False.
+
+    Which dim is tiled, and whether an op is tiled at all, likewise come from
+    that resolution: an op that never mentions loop_var simply gets no tiled
+    dim recorded for this hint_id, which is the correct outcome for ops that
+    are loop-invariant at this level (e.g. an INVARIANT operand's own read).
 
     loop_var must be the real per-iteration index symbol already present in
     the spliced body's own index expressions (see _body_loop_var) -- not a
-    freshly-minted, disconnected sympy.Symbol. coarse_tile.py's
-    plan_coarse_tile_groups resolves a DimHint to an op's tiled dim by
-    searching the op's actual output coordinates / reduction ranges for
-    loop_var (_loop_var_to_ranges_pos / _loop_var_to_reduction_ranges_pos);
-    an op that never mentions loop_var simply gets no tiled dim recorded
-    for this hint_id, which is the correct outcome for ops that are
-    loop-invariant at this level (e.g. an INVARIANT operand's own read).
+    freshly-minted, disconnected sympy.Symbol, for the same reason.
     """
     from torch_spyre._inductor.propagate_hints import DimHint
 
@@ -277,8 +287,81 @@ def _synthesize_dim_hints_for_group(
             loop_var=loop_var,
             is_reduction=is_reduction,
             hint_id=hint_id,
+            loop_var_range=trip_count,
         )
         op.dim_hints = [*existing, hint]
+
+
+def _stacking_carry_indices(
+    while_op: "ir.WhileLoop", loop_var: sympy.Symbol
+) -> frozenset[int]:
+    """Which carry positions are ``scan``-``ys`` stacking carries, not accumulators.
+
+    ``for_each_tile``'s map mode has no user carry at all: ``scan`` requires
+    one, so the frontend threads a step counter as the carry and puts the
+    per-tile output in ``ys`` (see for_each_tile.py's ``map_mode`` branch and
+    ``_stacked_to_full``). ``decompose_scan_to_while_loop`` then materializes
+    that ``ys`` accumulation as ANOTHER ``carried_inputs`` entry, so at the
+    ``ir.WhileLoop`` level it is positionally indistinguishable from a real
+    accumulator carry -- yet it needs the opposite treatment (see
+    while_loop_bridge.py's ``CarryBinding.stacking``).
+
+    The distinguishing evidence, taken from the IR rather than from the
+    frontend's own metadata (which does not survive to this point):
+
+    1. The body does not compute a new value for this carry position -- its
+       ``body_output`` IS the body's own placeholder for it, threaded
+       through unchanged. A real accumulator's ``body_output`` is a
+       different, op-produced buffer (``split_k_fn``: ``buf6``, its own
+       ``acc + x @ y`` result).
+    2. Some body op nonetheless WRITES it, in place, through a
+       ``MutationLayoutSHOULDREMOVE`` whose target is a view of that
+       placeholder -- so the carry is not merely a read-only pass-through
+       leaf (``split_m_fn``'s X ``xs`` leaf is exactly that, and must NOT be
+       folded).
+    3. That write's per-iteration position depends on ``loop_var``: the
+       target view's own offset mentions it. This is what makes it a stack
+       of tiles rather than one whole-buffer overwrite, and it is the fact
+       the fold arithmetic relies on.
+
+    Requiring all three keeps every other carry shape -- accumulator,
+    read-only pass-through leaf, scalar step counter -- on the pre-existing
+    path untouched.
+    """
+    from torch._inductor import ir
+
+    body_graph = while_op.body_subgraph.graph
+    placeholder_names = list(body_graph.graph_inputs.keys())
+    body_outputs = body_graph.graph_outputs
+
+    # Placeholders written in place, per iteration, at a loop_var-dependent
+    # offset (evidence 2 + 3).
+    tile_written: set[str] = set()
+    for op in body_graph.operations:
+        layout = getattr(op, "layout", None)
+        if not isinstance(layout, ir.MutationLayoutSHOULDREMOVE):
+            continue
+        target = layout.target
+        target_layout = getattr(target, "layout", None)
+        if target_layout is None:
+            continue
+        offset = sympy.sympify(getattr(target_layout, "offset", 0))
+        if loop_var not in offset.free_symbols:
+            continue
+        name = getattr(layout.get_buffer(), "get_name", lambda: None)()
+        if name is not None:
+            tile_written.add(name)
+
+    stacking: set[int] = set()
+    for i, placeholder_name in enumerate(placeholder_names):
+        if i >= len(body_outputs):
+            break
+        out_name = getattr(body_outputs[i], "get_name", lambda: None)()
+        if out_name != placeholder_name:  # evidence 1
+            continue
+        if placeholder_name in tile_written:
+            stacking.add(i)
+    return frozenset(stacking)
 
 
 def splice_while_loops(graph) -> None:
@@ -317,8 +400,12 @@ def splice_while_loops(graph) -> None:
             if loop_var is None:
                 continue  # body shape doesn't match; leave untouched
 
-            carries = carry_bindings_for(while_op)
-            group_ops = splice_while_loop(graph, while_op, carries)
+            carries = carry_bindings_for(
+                while_op, _stacking_carry_indices(while_op, loop_var)
+            )
+            group_ops = splice_while_loop(
+                graph, while_op, carries, trip_count=result.trip_count
+            )
 
             _synthesize_dim_hints_for_group(
                 group_ops, loop_var, hint_id, result.trip_count
