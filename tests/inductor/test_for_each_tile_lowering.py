@@ -185,5 +185,17 @@ class TestTryProveForEachTile(unittest.TestCase):
         self.assertTrue(result.reason)
 
 
+class TestPassPipelineRegistration(unittest.TestCase):
+    def test_splice_while_loops_is_first_pass(self):
+        from torch_spyre._inductor.passes import CustomPreSchedulingPasses
+        from torch_spyre._inductor.wsr.for_each_tile_lowering import (
+            splice_while_loops,
+        )
+
+        pipeline = CustomPreSchedulingPasses()
+
+        self.assertIs(pipeline.passes[0], splice_while_loops)
+
+
 if __name__ == "__main__":
     unittest.main()
