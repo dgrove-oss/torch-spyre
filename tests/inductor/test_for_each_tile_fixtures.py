@@ -67,6 +67,89 @@ def split_k_fn(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
     return final
 
 
+LQ, LK, D = 128, 256, 128
+SOFTMAX_TILE_SIZE = 128
+
+
+def attention_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    torch.manual_seed(0)
+    Q = torch.randn(LQ, D, dtype=torch.float16)
+    K = torch.randn(LK, D, dtype=torch.float16)
+    V = torch.randn(LK, D, dtype=torch.float16)
+    return Q, K, V
+
+
+def online_softmax_fn(
+    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
+) -> torch.Tensor:
+    """Case D: single for_each_tile loop, 3-leaf carry (m, denom, acc).
+
+    Q is closed over whole (not tiled -- the outer Q-loop is deferred to a
+    follow-on nested fixture). K/V are Kind.SLICE, co-indexed and tiled along
+    Lk. carry = (m, denom, acc): running max, running sum-of-exp, weighted
+    accumulator -- the online-softmax recurrence flash attention's inner
+    loop needs.
+    """
+
+    def body(carry, tiles):
+        m, denom, acc = carry
+        k_tile, v_tile = tiles
+        scores = Q @ k_tile.transpose(-1, -2)
+        m_new = torch.maximum(m, scores.amax(dim=-1, keepdim=True))
+        correction = torch.exp(m - m_new)
+        p = torch.exp(scores - m_new)
+        denom_new = denom * correction + p.sum(dim=-1, keepdim=True)
+        acc_new = acc * correction + p @ v_tile
+        return (m_new, denom_new, acc_new), None
+
+    m0 = torch.full((Q.shape[0], 1), float("-inf"), device=Q.device, dtype=Q.dtype)
+    denom0 = torch.zeros((Q.shape[0], 1), device=Q.device, dtype=Q.dtype)
+    acc0 = torch.zeros_like(Q)
+
+    (m, denom, acc), _ = for_each_tile(
+        body,
+        (K, V),
+        dims=(0, 0),
+        tile_size=SOFTMAX_TILE_SIZE,
+        init=(m0, denom0, acc0),
+    )
+    return acc / denom
+
+
+def online_softmax_reference(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    tile_size: int = SOFTMAX_TILE_SIZE,
+) -> torch.Tensor:
+    """Eager fp32 online-softmax, looped in Python -- isolates fixture-math bugs.
+
+    Computed once here and compared against a straightforward softmax(Q @
+    K.T) @ V, so a mismatch between "compiled online_softmax_fn" and this
+    function isolates a lowering bug, while a mismatch between this function
+    and the straightforward softmax would indicate a fixture-math bug caught
+    before it ever reaches the compiler.
+    """
+    Qf, Kf, Vf = Q.float(), K.float(), V.float()
+    lk = Kf.shape[0]
+    m = torch.full((Qf.shape[0], 1), float("-inf"), dtype=torch.float32)
+    denom = torch.zeros((Qf.shape[0], 1), dtype=torch.float32)
+    acc = torch.zeros_like(Qf)
+    for start in range(0, lk, tile_size):
+        k_tile = Kf[start : start + tile_size]
+        v_tile = Vf[start : start + tile_size]
+        scores = Qf @ k_tile.transpose(-1, -2)
+        m_new = torch.maximum(m, scores.amax(dim=-1, keepdim=True))
+        correction = torch.exp(m - m_new)
+        p = torch.exp(scores - m_new)
+        denom = denom * correction + p.sum(dim=-1, keepdim=True)
+        acc = acc * correction + p @ v_tile
+        m = m_new
+    naive = torch.softmax(Qf @ Kf.transpose(-1, -2), dim=-1) @ Vf
+    torch.testing.assert_close(acc / denom, naive, atol=1e-2, rtol=1e-2)
+    return acc / denom
+
+
 @contextlib.contextmanager
 def _post_grad_graphs():
     """Capture each post-grad graph right after decompose_scan_to_while_loop runs.

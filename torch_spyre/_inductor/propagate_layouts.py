@@ -474,8 +474,7 @@ def _single_arg_op_layout(
 
     # Single-arg pointwise
     assert isinstance(data, Pointwise)
-    origin_node = next(iter(data.origins))
-    aten_op = origin_node.target
+    aten_op = next(iter(data.origins)).target if data.origins else None
     match aten_op:
         case (
             prims.convert_element_type.default

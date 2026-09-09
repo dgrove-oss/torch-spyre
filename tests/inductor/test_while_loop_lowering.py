@@ -19,10 +19,11 @@ Minimum coverage per docs/superpowers/specs/2026-09-09-while-loop-lowering-desig
    read-copy/stick-layout gap; see that test's own docstring.
 2 (carry + Kind.SLICE tile-advancing input): covered implicitly by
    test_carry_mode_split_k, whose X/Y operands are both Kind.SLICE.
-Cases 3-6 (Kind.GATHER, multiple carries, nested for_each_tile, and the
-deliberate-decline case) are follow-on work once cases 1/2 are green --
-tracked as open items rather than duplicated here, since each needs its own
-fixture beyond what Task 1 vendored.
+4. Multiple independent carries: covered by test_carry_mode_online_softmax
+   (carry = (m, l, acc), an online-softmax flash-attention inner loop).
+Cases 3, 5, 6 (Kind.GATHER, nested for_each_tile, and the deliberate-decline
+case) are follow-on work -- tracked as open items rather than duplicated
+here, since each needs its own fixture beyond what's vendored so far.
 
 test_map_mode_split_m (map mode: Kind.SLICE + Kind.INVARIANT operands, a
 stacking carry, no user carry) passes end to end with verified numerics and
@@ -38,7 +39,10 @@ import torch_spyre  # noqa: F401  registers the "spyre" device
 from torch_spyre.constants import DEVICE_NAME
 
 from tests.inductor.test_for_each_tile_fixtures import (
+    attention_inputs,
     matmul_inputs,
+    online_softmax_fn,
+    online_softmax_reference,
     split_k_fn,
     split_m_fn,
 )
@@ -110,6 +114,35 @@ class TestWhileLoopLowering(unittest.TestCase):
 
         compiled = torch.compile(split_k_fn, backend="inductor", fullgraph=True)
         out = compiled(X_spyre, Y_spyre)
+
+        torch.testing.assert_close(
+            out.cpu().float(), ref, atol=self.ATOL, rtol=self.RTOL
+        )
+
+    def test_carry_mode_online_softmax(self):
+        """Carry mode: 3-leaf carry (m, l, acc), online-softmax over K/V tiles.
+
+        Case 4 (multiple independent carries) from the design spec's minimum
+        coverage list. carry_bindings_for/splice_while_loop's per-binding loop
+        is already generic over an arbitrary-length carry list; this is the
+        first fixture that actually drives a 3-leaf init= end to end, both to
+        confirm the pytree carry survives decompose_scan_to_while_loop's
+        scan -> while_loop decomposition intact, and to confirm
+        _extra_readers_of_placeholder/_snapshot_carry_placeholder correctly
+        handle the write-after-read hazard this body's own m carry hits:
+        `correction = exp(m - m_new)` reads m's OLD value a second time,
+        after m_new (m's per-iteration output) has already been computed --
+        the exact case an in-place-only rewrite would silently corrupt.
+        """
+        Q, K, V = attention_inputs()
+        ref = online_softmax_reference(Q, K, V)
+
+        Q_spyre = Q.to(DEVICE_NAME)
+        K_spyre = K.to(DEVICE_NAME)
+        V_spyre = V.to(DEVICE_NAME)
+
+        compiled = torch.compile(online_softmax_fn, backend="inductor", fullgraph=True)
+        out = compiled(Q_spyre, K_spyre, V_spyre)
 
         torch.testing.assert_close(
             out.cpu().float(), ref, atol=self.ATOL, rtol=self.RTOL

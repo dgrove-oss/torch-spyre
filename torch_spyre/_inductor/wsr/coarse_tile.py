@@ -831,7 +831,21 @@ def _plan_tiling_propagation(
             if info is None:
                 continue
 
-            has_tiled_reduction = any(info.loop_tiled_reduction_dims)
+            # Only count a reduction-tiled level that _group_reduction_
+            # tiled_levels_in_group also counts -- i.e. exclude WhileLoop-
+            # splice hint levels (see that function's docstring). A
+            # WhileLoop-splice level's "reduction across iterations" is the
+            # loop's own carry semantics (buf7 = acc + buf6, carried by the
+            # while_loop itself): it needs no fill/combine accumulator of
+            # its own. Building one anyway (as an unfiltered `any(...)`
+            # here would) layers a second, redundant accumulation mechanism
+            # on top of the loop's carry -- a real bug, not just wasted
+            # work, since the fill op reseeds the accumulator to the
+            # reduction identity on a schedule that doesn't match the
+            # while_loop's own carry-in/carry-out timing.
+            has_tiled_reduction = any(
+                info.loop_tiled_reduction_dims[i] for i in group_reduction_tiled_levels
+            )
             if isinstance(op.data, Reduction) and has_tiled_reduction:
                 reduction_type = op.data.reduction_type
                 identity = _reduction_identity_value(reduction_type, op.get_dtype())
@@ -1804,6 +1818,21 @@ def _group_reduction_tiled_levels_in_group(
     plan_coarse_tile_groups's hint_id_to_reduction_ranges_pos, gated on
     isinstance(op.data, Reduction)), so this scan only needs to inspect
     Reduction ops; a Pointwise-only group always yields an empty set.
+
+    A level whose hint is a WhileLoop-splice hint (``loop_var_range is not
+    None``, see propagate_hints.py's DimHint docstring) is excluded even
+    when some Reduction op tiles a reduction dim there. Both of this
+    function's callers exist to catch a same-outer-group Pointwise sibling
+    that would see a still-partial sum -- a real hazard for an ordinary
+    spyre_hint() reduction group, where nothing else re-runs the Pointwise
+    op once the reduction's own inner loop finishes accumulating. A
+    WhileLoop-splice level has no such hazard: the group is one iteration
+    of the spliced body, and a Pointwise op there (e.g. an accumulator's
+    ``acc + p @ v_tile``) is SUPPOSED to fold each iteration's per-tile
+    partial into the carry -- that folding, plus the carry-back across
+    iterations, is exactly how the reduction completes over the whole
+    loop. Flagging it as premature (or deferring it to copy_out) would
+    treat the loop's own carry semantics as a bug.
     """
     reduction_levels: set[int] = set()
     for o in group_ops:
@@ -1811,6 +1840,7 @@ def _group_reduction_tiled_levels_in_group(
             continue
         o_out = op_out_coords(o)
         hint_id_to_reduction_ranges_pos: dict[int, int] = {}
+        hint_id_to_loop_var_range: dict[int, object] = {}
         for h in getattr(o, "dim_hints", []):
             if h.loop_var is None:
                 continue
@@ -1818,8 +1848,11 @@ def _group_reduction_tiled_levels_in_group(
             if pos is None or not resolved_is_reduction:
                 continue
             hint_id_to_reduction_ranges_pos[h.hint_id] = pos
+            hint_id_to_loop_var_range[h.hint_id] = h.loop_var_range
         for level_idx, (hint_id, _count) in enumerate(levels):
-            if hint_id in hint_id_to_reduction_ranges_pos:
+            if hint_id in hint_id_to_reduction_ranges_pos and (
+                hint_id_to_loop_var_range.get(hint_id) is None
+            ):
                 reduction_levels.add(level_idx)
     return reduction_levels
 
@@ -2025,10 +2058,49 @@ def _loop_var_pos_from_reads(
     exhibits that relationship -- so a genuinely loop-invariant op still
     records no tiled dim, the correct outcome (see
     ``_synthesize_dim_hints_for_group``'s docstring).
+
+    Ambiguity: ``sym_coeff == var_coeff * rng`` is a NUMERIC coincidence
+    whenever ``var``'s own extent happens to equal the loop's real
+    per-trip stride divided by ``var_coeff`` -- which is exactly what
+    happens when a matmul's inner reduction dim's size coincides with the
+    splice's tile size (e.g. flash-attention's online-softmax body,
+    where D == SOFTMAX_TILE_SIZE: ``p @ v_tile``'s D-contraction var
+    satisfies the equation against V's stacked-leaf read purely because
+    ``D * 1 == tile_size``, even though ``sym`` (the splice loop var)
+    doesn't advance D at all -- it advances the leaf's own outer/stacking
+    dim, which has no representation in this op's ``dep.ranges``).
+
+    An output-channel match (``var`` is one of the op's own output dims)
+    is trustworthy on a single read: ``_loop_var_to_ranges_pos`` checks it
+    against the op's real output coordinates, an independent structural
+    fact, not just this one dep's coefficients. A reduction-channel match
+    (``var`` is one of the op's reduction vars) has no such independent
+    check available -- ``reduction_loop_vars`` only tells us ``var`` is
+    *a* reduction var of this op, not that ``sym`` is what advances it.
+
+    Require CORROBORATION when the same read has more than one candidate
+    var satisfying the equation -- that is precisely the ambiguous case
+    above, where a genuine advancing var and a coincidentally-matching one
+    could both appear on the same dep and cannot be told apart locally.
+    There, only trust a reduction-channel match when at least two of the
+    op's reads independently agree on the same ``(var, sym)`` relationship
+    (as split_k_fn's genuine case does -- both matmul operands carry
+    ``u0`` and both agree on the K reduction var).
+
+    But when a read has EXACTLY ONE candidate var, there is no competing
+    interpretation of that read to disambiguate against, so a reduction-
+    channel match there is trustworthy on its own -- the same footing as
+    an output-channel match. This matters for an accumulator body's
+    second matmul (e.g. ``acc + p @ v_tile``): only the carry-in operand
+    (``v_tile``'s stacked-leaf read) ever carries ``sym`` at all -- the
+    other operand (``p``) is always the previous stage's tile-local
+    scratch and never mentions ``sym`` -- so a second corroborating read
+    can never exist, even though the single read's match is unambiguous.
     """
     rw = op.get_read_writes()
     out_coords = op_out_coords(op)
     red_vars = reduction_loop_vars(op) if isinstance(op.data, Reduction) else []
+    reduction_matches: dict[sympy.Symbol, int] = {}
     for dep in rw.reads:
         if not isinstance(dep, MemoryDep):
             continue
@@ -2038,6 +2110,7 @@ def _loop_var_pos_from_reads(
         sym_coeff = index.coeff(sym)
         if sym_coeff == 0:
             continue
+        read_reduction_candidates: list[sympy.Symbol] = []
         for var, rng in dep.ranges.items():
             var_coeff = index.coeff(var)
             if var_coeff == 0:
@@ -2048,7 +2121,16 @@ def _loop_var_pos_from_reads(
             if pos is not None:
                 return pos, False
             if var in red_vars:
-                return red_vars.index(var), True
+                read_reduction_candidates.append(var)
+        if len(read_reduction_candidates) == 1:
+            var = read_reduction_candidates[0]
+            reduction_matches[var] = reduction_matches.get(var, 0) + 2
+        else:
+            for var in read_reduction_candidates:
+                reduction_matches[var] = reduction_matches.get(var, 0) + 1
+    for var, count in reduction_matches.items():
+        if count >= 2:
+            return red_vars.index(var), True
     return None, False
 
 
