@@ -66,17 +66,28 @@ class TestSpliceWhileLoop(unittest.TestCase):
     def test_removes_while_op_and_inserts_body_ops(self):
         import torch_spyre._inductor.wsr.while_loop_bridge as bridge
 
-        body_op_a = mock.Mock(name="body_op_a")
-        body_op_b = mock.Mock(name="body_op_b")
+        body_op_a = mock.Mock(name="body_op_a", spec=["get_operation_name"])
+        body_op_b = mock.Mock(name="body_op_b", spec=["get_operation_name"])
         multi_output = mock.Mock(name="multi_output")
+        multi_output.inputs = []
+
+        before = mock.Mock(name="before")
+        before.inputs = []
 
         while_op = mock.Mock()
         while_op.carried_inputs = []
+        while_op.inputs = []
         while_op.body_subgraph.graph.graph_outputs = []
+        while_op.body_subgraph.graph.graph_inputs = {}
         while_op.body_subgraph.graph.operations = [body_op_a, body_op_b]
+        while_op.body_subgraph.graph.name_to_op = {}
+        while_op.body_subgraph.graph.name_to_buffer = {}
 
         graph = mock.Mock()
-        graph.operations = [mock.Mock(name="before"), while_op, multi_output]
+        graph.operations = [before, while_op, multi_output]
+        graph.name_to_op = {}
+        graph.name_to_buffer = {}
+        graph.buffers = []
 
         spliced = bridge.splice_while_loop(graph, while_op, carries=[])
 
@@ -88,17 +99,26 @@ class TestSpliceWhileLoop(unittest.TestCase):
     def test_splices_at_while_op_position(self):
         import torch_spyre._inductor.wsr.while_loop_bridge as bridge
 
-        body_op = mock.Mock(name="body_op")
+        body_op = mock.Mock(name="body_op", spec=["get_operation_name"])
         before = mock.Mock(name="before")
+        before.inputs = []
         after = mock.Mock(name="after")
+        after.inputs = []
 
         while_op = mock.Mock()
         while_op.carried_inputs = []
+        while_op.inputs = []
         while_op.body_subgraph.graph.graph_outputs = []
+        while_op.body_subgraph.graph.graph_inputs = {}
         while_op.body_subgraph.graph.operations = [body_op]
+        while_op.body_subgraph.graph.name_to_op = {}
+        while_op.body_subgraph.graph.name_to_buffer = {}
 
         graph = mock.Mock()
         graph.operations = [before, while_op, after]
+        graph.name_to_op = {}
+        graph.name_to_buffer = {}
+        graph.buffers = []
 
         bridge.splice_while_loop(graph, while_op, carries=[])
 

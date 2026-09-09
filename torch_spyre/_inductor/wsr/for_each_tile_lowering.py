@@ -182,3 +182,157 @@ def try_prove_for_each_tile(while_op: "ir.WhileLoop") -> ProverResult:
             ),
         )
     return ProverResult(accepted=True, trip_count=trip_count)
+
+
+def _body_loop_var(while_op: "ir.WhileLoop") -> sympy.Symbol | None:
+    """Find the real per-iteration index symbol the spliced body already uses.
+
+    for_each_tile's frontend always carries the trip counter as
+    carried_inputs[0] (see for_each_tile.py's _step_counter/count_mode
+    logic), so the body subgraph's own first graph input is that same carry
+    positionally. decompose_scan_to_while_loop's body lowers each tile's
+    scan-index arithmetic to a leading DynamicScalar op that reads that
+    first placeholder (via ops.load/.item()) and defines a fresh unbacked
+    symbol (e.g. ``u0``); every tiled op's real index expressions
+    (ExternKernelOut offsets, ComputedBuffer write indices, ...) are then
+    written in terms of that symbol -- confirmed against a live compiled
+    graph for both split_m_fn (map mode) and split_k_fn (carry mode).
+
+    _synthesize_dim_hints_for_group's DimHint.loop_var must be exactly this
+    symbol: coarse_tile.py's _loop_var_to_ranges_pos/
+    _loop_var_to_reduction_ranges_pos resolve loop_var by searching for it
+    inside an op's own index expressions (via op_out_coords/
+    reduction_loop_vars), so a freshly-minted, disconnected sympy.Symbol
+    would never resolve and every op would land with empty tiled dims.
+
+    Returns None if the body subgraph does not have this exact shape (no
+    DynamicScalar reading the first placeholder), signaling the caller to
+    decline rather than synthesize a hint nothing will ever match.
+    """
+    from torch._inductor import ir
+
+    body_subgraph = getattr(while_op, "body_subgraph", None)
+    body_graph = getattr(body_subgraph, "graph", None) if body_subgraph else None
+    if body_graph is None:
+        return None
+
+    graph_inputs = getattr(body_graph, "graph_inputs", None)
+    if not graph_inputs:
+        return None
+    first_placeholder = next(iter(graph_inputs), None)
+    if first_placeholder is None:
+        return None
+
+    for op in getattr(body_graph, "operations", None) or ():
+        if not isinstance(op, ir.DynamicScalar):
+            continue
+        defs = op.get_unbacked_symbol_defs()
+        if len(defs) != 1:
+            continue
+        inputs = getattr(op, "inputs", None) or []
+        input_names = [i.get_name() for i in inputs if hasattr(i, "get_name")]
+        if input_names == [first_placeholder]:
+            return next(iter(defs))
+    return None
+
+
+_next_synthetic_hint_id_start = 1 << 30  # reserved range, well above real hint scopes
+
+
+def _synthesize_dim_hints_for_group(
+    group_ops: list["ir.Operation"],
+    loop_var: sympy.Symbol,
+    hint_id: int,
+    trip_count: sympy.Expr,
+) -> None:
+    """Stamp one synthesized DimHint per op in group_ops for this while-loop level.
+
+    loop_var is this level's own induction variable -- there is exactly one
+    per nesting level, unlike a user spyre_hint() scope which can cover many
+    ops arbitrarily. is_reduction/dim_names/which dim is tiled come from
+    each op's own read/write shape: an op whose write shape shrank relative
+    to the pre-splice body is being reduced into (is_reduction=True); every
+    other tiled op is treated as a plain per-tile map write.
+
+    loop_var must be the real per-iteration index symbol already present in
+    the spliced body's own index expressions (see _body_loop_var) -- not a
+    freshly-minted, disconnected sympy.Symbol. coarse_tile.py's
+    plan_coarse_tile_groups resolves a DimHint to an op's tiled dim by
+    searching the op's actual output coordinates / reduction ranges for
+    loop_var (_loop_var_to_ranges_pos / _loop_var_to_reduction_ranges_pos);
+    an op that never mentions loop_var simply gets no tiled dim recorded
+    for this hint_id, which is the correct outcome for ops that are
+    loop-invariant at this level (e.g. an INVARIANT operand's own read).
+    """
+    from torch_spyre._inductor.propagate_hints import DimHint
+
+    for op in group_ops:
+        if not hasattr(op, "data"):
+            continue
+        existing = list(getattr(op, "dim_hints", []) or [])
+        is_reduction = getattr(op.data, "reduction_type", None) is not None
+        hint = DimHint(
+            dim_names=[f"_while_loop_{hint_id}"],
+            split_count=1,  # per-level count; coarse_tile derives real counts from `levels`
+            loop_var=loop_var,
+            is_reduction=is_reduction,
+            hint_id=hint_id,
+        )
+        op.dim_hints = [*existing, hint]
+
+
+def splice_while_loops(graph) -> None:
+    """CustomPreSchedulingPasses entry point: splice every for_each_tile WhileLoop.
+
+    Runs to a fixed point (handles nested for_each_tile, whose inner
+    WhileLoop only appears after the outer one's body has been spliced in).
+    Calls coarse_tile_pre_stickify immediately per accepted group -- before
+    propagate_named_dims/assign_dim_hints ever run for this compile -- since
+    those overwrite op.dim_hints from scratch and would otherwise silently
+    clobber the synthesized hints this function just stamped.
+    """
+    from torch._inductor import ir
+
+    from torch_spyre._inductor.wsr.coarse_tile import coarse_tile_pre_stickify
+    from torch_spyre._inductor.wsr.while_loop_bridge import (
+        carry_bindings_for,
+        splice_while_loop,
+    )
+
+    hint_id = _next_synthetic_hint_id_start
+    group_idx = 0
+
+    while True:
+        while_ops = [op for op in graph.operations if isinstance(op, ir.WhileLoop)]
+        if not while_ops:
+            break
+
+        progressed = False
+        for while_op in while_ops:
+            result = try_prove_for_each_tile(while_op)
+            if not result.accepted:
+                continue  # leave untouched; falls through to upstream's default path
+
+            loop_var = _body_loop_var(while_op)
+            if loop_var is None:
+                continue  # body shape doesn't match; leave untouched
+
+            carries = carry_bindings_for(while_op)
+            group_ops = splice_while_loop(graph, while_op, carries)
+
+            _synthesize_dim_hints_for_group(
+                group_ops, loop_var, hint_id, result.trip_count
+            )
+
+            levels = [(hint_id, result.trip_count)]
+            coarse_tile_pre_stickify(
+                graph, groups=[(group_ops, levels)], group_idx_offset=group_idx
+            )
+
+            group_idx += 1
+            hint_id += 1
+            progressed = True
+
+        if not progressed:
+            # Every remaining WhileLoop was declined; stop rather than loop forever.
+            break
