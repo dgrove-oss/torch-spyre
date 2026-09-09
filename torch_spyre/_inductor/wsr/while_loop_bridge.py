@@ -25,11 +25,14 @@ producer.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from torch._inductor import ir
     from torch._inductor.graph import GraphLowering
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,6 +166,55 @@ def _substitute_direct_input_refs(
                     base.data = inner_replacement
 
 
+def _assert_body_output_not_read_elsewhere(
+    body_output_name: str,
+    body_ops: list["ir.Operation"],
+) -> None:
+    """Raise if any spliced op besides body_output_name's own producer reads it.
+
+    A mutated carry's write side is redirected to scratch_name, which never
+    resolves to a real buffer today (see splice_while_loop's caller
+    comment) -- that is only safe because, in both fixtures this bridge is
+    validated against, nothing reads a mutated carry's per-iteration output
+    a second time within the same body pass. This function makes that
+    invariant an explicit, checked precondition rather than a silent
+    assumption: if a future for_each_tile body violates it, this raises
+    immediately here, rather than letting the second read silently resolve
+    to a nonexistent (or, worse, stale/aliased) scratch_name buffer
+    downstream in codegen.
+
+    Uses op.get_read_writes() rather than hand-parsing inner_fn/.inputs --
+    confirmed to correctly surface both read shapes (named ops.load calls
+    and DynamicScalar/ExternKernelOut's direct object-reference inputs)
+    uniformly for every op kind seen in either fixture.
+    """
+    for op in body_ops:
+        op_name = getattr(op, "get_operation_name", lambda: None)()
+        if op_name is not None and op_name == body_output_name:
+            continue  # the producer itself; not a foreign read
+        try:
+            rw = op.get_read_writes()
+        except Exception as e:  # noqa: BLE001 -- best-effort; see docstring
+            logger.debug(
+                "_assert_body_output_not_read_elsewhere: get_read_writes() "
+                "raised for %s: %s",
+                op_name,
+                e,
+            )
+            continue
+        read_names = {getattr(d, "name", None) for d in rw.reads}
+        if body_output_name in read_names:
+            raise RuntimeError(
+                f"splice_while_loop: op {op_name!r} reads {body_output_name!r}, "
+                "a mutated carry's per-iteration output, a second time within "
+                "the same while_loop body. This carry's write side is "
+                "redirected to a scratch_name that no fill/drain mechanism "
+                "backs with a real buffer yet, so this read cannot be "
+                "satisfied. See _assert_body_output_not_read_elsewhere's "
+                "docstring in while_loop_bridge.py."
+            )
+
+
 def splice_while_loop(
     graph: "GraphLowering",
     while_op: "ir.WhileLoop",
@@ -236,6 +288,20 @@ def splice_while_loop(
         if body_output_name is not None and not is_passthrough:
             # Real per-iteration rewrite: redirect the write side to the
             # persistent scratch identity a future fill/drain step will own.
+            # scratch_name never resolves to a real buffer today (no
+            # fill/drain mechanism exists yet -- carry_bindings_for only
+            # mints the name) -- confirmed harmless for both known
+            # fixtures, where a mutated carry's body_output is read exactly
+            # zero additional times within the same body pass, so nothing
+            # ever loads this name back before drain. That is an invariant
+            # of the two fixtures, not something the code enforces on its
+            # own, so assert it explicitly: a future for_each_tile body
+            # that reads its own mutated carry's updated value a second
+            # time within one iteration (e.g. as both accumulator and an
+            # intra-body side-computation input) must fail loudly here,
+            # rather than silently resolving that second read to a
+            # nonexistent scratch_name buffer downstream in codegen.
+            _assert_body_output_not_read_elsewhere(body_output_name, body_ops)
             name_map[body_output_name] = binding.scratch_name
 
         # Read side always resolves to the real, already-registered initial
