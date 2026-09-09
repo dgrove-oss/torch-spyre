@@ -373,53 +373,178 @@ def _substitute_direct_input_refs(
         substitute(target, _set_target)
 
 
-def _assert_body_output_not_read_elsewhere(
+def _extra_readers_of_placeholder(
+    placeholder_name: str,
     body_output_name: str,
     body_ops: list["ir.Operation"],
-) -> None:
-    """Raise if any spliced op besides body_output_name's own producer reads it.
+) -> list["ir.Operation"]:
+    """Return every spliced op that executes AFTER body_output_name's own
+    producer and still reads placeholder_name (the carry's OLD,
+    pre-iteration value).
 
-    A mutated carry's write side is redirected to scratch_name, which never
-    resolves to a real buffer today (see splice_while_loop's caller
-    comment) -- that is only safe because, in both fixtures this bridge is
-    validated against, nothing reads a mutated carry's per-iteration output
-    a second time within the same body pass. This function makes that
-    invariant an explicit, checked precondition rather than a silent
-    assumption: if a future for_each_tile body violates it, this raises
-    immediately here, rather than letting the second read silently resolve
-    to a nonexistent (or, worse, stale/aliased) scratch_name buffer
-    downstream in codegen.
+    ``_rewire_accumulator_output`` makes the carry's new value land in place
+    in the carry's own initial buffer -- correct for PyTorch's ``while_loop``
+    semantics (which give every iteration's body a copy-in/compute/copy-out
+    view of each carry) only because the *read* side is also redirected to
+    that same buffer (see splice_while_loop's ``name_map``). Once the
+    producer's write has landed there, any OTHER op that still reads
+    placeholder_name is asking for the OLD value but will actually observe
+    the NEW one -- a write-after-read hazard invisible to ``split_k_fn``
+    (whose ``acc + x @ y`` reads the carry exactly once, in the producer
+    itself) but real for a body like online-softmax's ``correction =
+    exp(m - m_new)``, which legitimately needs both m's old value and its
+    freshly-computed new value in the same pass.
+
+    The exemption is by EXECUTION ORDER, not by identity with the producer
+    op alone: a multi-op producer chain (e.g. online-softmax's `l_new = l *
+    correction + p.sum(...)`, where `buf12 = l * correction` reads l's
+    placeholder and only the later `buf14 = buf12 + buf13` is
+    body_output_name/the op _rewire_accumulator_output aliases in place)
+    has earlier steps that read the placeholder before the in-place write
+    has happened -- those reads are safe regardless of whether they are
+    body_output_name's own op. Only ops that appear AFTER body_output_name
+    in body_ops's topological order and still read placeholder_name are
+    real hazards.
 
     Uses op.get_read_writes() rather than hand-parsing inner_fn/.inputs --
     confirmed to correctly surface both read shapes (named ops.load calls
     and DynamicScalar/ExternKernelOut's direct object-reference inputs)
-    uniformly for every op kind seen in either fixture.
+    uniformly for every op kind seen in every fixture so far.
     """
-    for op in body_ops:
+
+    def _matches_body_output(op: "ir.Operation") -> bool:
         op_name = getattr(op, "get_operation_name", lambda: None)()
-        if op_name is not None and op_name == body_output_name:
-            continue  # the producer itself; not a foreign read
+        buf_name = getattr(op, "get_name", lambda: None)()
+        return body_output_name in (op_name, buf_name)
+
+    body_output_idx = next(
+        (i for i, op in enumerate(body_ops) if _matches_body_output(op)),
+        None,
+    )
+
+    extra_readers = []
+    for idx, op in enumerate(body_ops):
+        if body_output_idx is not None and idx <= body_output_idx:
+            # Runs at-or-before the in-place write lands; sees the old
+            # value by construction of program order, including
+            # body_output_name's own producer (expected to read the old
+            # value once, to compute the new one from it).
+            continue
+        op_name = getattr(op, "get_operation_name", lambda: None)()
         try:
             rw = op.get_read_writes()
         except Exception as e:  # noqa: BLE001 -- best-effort; see docstring
             logger.debug(
-                "_assert_body_output_not_read_elsewhere: get_read_writes() "
-                "raised for %s: %s",
+                "_extra_readers_of_placeholder: get_read_writes() raised for %s: %s",
                 op_name,
                 e,
             )
             continue
         read_names = {getattr(d, "name", None) for d in rw.reads}
-        if body_output_name in read_names:
-            raise RuntimeError(
-                f"splice_while_loop: op {op_name!r} reads {body_output_name!r}, "
-                "a mutated carry's per-iteration output, a second time within "
-                "the same while_loop body. This carry's write side is "
-                "redirected to a scratch_name that no fill/drain mechanism "
-                "backs with a real buffer yet, so this read cannot be "
-                "satisfied. See _assert_body_output_not_read_elsewhere's "
-                "docstring in while_loop_bridge.py."
+        if placeholder_name in read_names:
+            extra_readers.append(op)
+    return extra_readers
+
+
+def _snapshot_carry_placeholder(
+    graph: "GraphLowering",
+    placeholder_name: str,
+    body_output_name: str,
+    real_input: Any,
+    extra_readers: list["ir.Operation"],
+    body_ops: list["ir.Operation"],
+) -> list["ir.Operation"]:
+    """Preserve a WAR-hazardous carry's old value for its extra readers.
+
+    Inserts a fresh ComputedBuffer that copies real_input's current
+    (pre-iteration) contents, placed in body_ops immediately before the
+    carry's own producer op, then redirects each op in extra_readers to
+    read that snapshot instead of placeholder_name -- so they keep seeing
+    the OLD value even after the producer's in-place write (installed by
+    ``_rewire_accumulator_output``, which still runs unchanged) has
+    overwritten real_input with the NEW one.
+
+    This is the correctness-first fallback for the WAR hazard
+    ``_extra_readers_of_placeholder`` detects: it always produces a working
+    (if not maximally efficient) program by paying for one extra copy per
+    hazardous carry per splice. A later pass could elide that copy whenever
+    it can prove the snapshot is never actually needed (e.g. hoisting it
+    out of a loop, or noticing the extra readers don't survive some other
+    transform) -- deliberately deferred, not attempted here.
+
+    Returns body_ops with the snapshot inserted; extra_readers' own
+    ComputedBuffer objects are reconstructed in place within that list (via
+    redirect_computed_buffer_reads) exactly as splice_while_loop's own
+    global name_map rewrite does for every other redirected read.
+    """
+    from torch._inductor import ir
+    from torch._inductor.ir import ComputedBuffer, FixedLayout, Pointwise
+    from torch_spyre._inductor.pass_utils import redirect_computed_buffer_reads
+
+    target = real_input
+    while isinstance(target, ir.MutableBox):
+        target = target.data
+    target_layout = target.layout
+
+    snapshot_name = graph.qualify_name(f"while_loop_carry_snapshot_{placeholder_name}")
+    snapshot_layout = FixedLayout(
+        target_layout.device,
+        target_layout.dtype,
+        list(target_layout.size),
+        list(target_layout.stride),
+    )
+    snapshot_data = Pointwise(
+        device=target_layout.device,
+        dtype=target_layout.dtype,
+        inner_fn=target.make_loader(),
+        ranges=list(target_layout.size),
+    )
+    snapshot_buf = ComputedBuffer(
+        name=snapshot_name,
+        layout=snapshot_layout,
+        data=snapshot_data,
+    )
+    snapshot_buf.operation_name = snapshot_name
+    snapshot_buf.origins = getattr(target, "origins", None) or ir.OrderedSet()
+
+    # snapshot_buf is constructed here, not under the inner body subgraph's
+    # SubgraphLowering context, so it never self-registered anywhere (see
+    # _transplant_buffer_registrations's docstring on why ordinary spliced
+    # ops need that transplant at all) -- register it directly into the
+    # outer graph so later get_buffer(snapshot_name)/get_operation(...)
+    # lookups (e.g. coarse_tile.py's read-copy planning) succeed.
+    graph.name_to_op[snapshot_name] = snapshot_buf
+    graph.name_to_buffer[snapshot_name] = snapshot_buf
+    if snapshot_buf not in graph.buffers:
+        graph.buffers.append(snapshot_buf)
+
+    # The producer isn't always a ComputedBuffer -- e.g. online-softmax's
+    # `p @ v_tile` term makes it a FallbackKernel/MultiOutput pair, with the
+    # MultiOutput carrying body_output_name. Match by name, not type, so
+    # the snapshot lands before whichever op shape actually produces it.
+    producer_idx = next(
+        i
+        for i, op in enumerate(body_ops)
+        if getattr(op, "get_name", lambda: None)() == body_output_name
+    )
+    body_ops = list(body_ops)
+    body_ops.insert(producer_idx, snapshot_buf)
+
+    local_map = {placeholder_name: snapshot_name}
+    for reader in extra_readers:
+        idx = body_ops.index(reader)
+        if hasattr(reader, "data"):
+            body_ops[idx] = redirect_computed_buffer_reads(
+                reader,
+                local_map,
+                body_ops,
+                pass_name="splice_while_loops",
+                reason="preserve a WAR-hazardous carry's pre-iteration value",
             )
+        else:
+            _substitute_direct_input_refs([reader], {placeholder_name: snapshot_buf})
+
+    return body_ops
 
 
 def _rewire_accumulator_output(
@@ -508,8 +633,24 @@ def _repoint_refs_to_buffer(
     itself, and a ``ReinterpretView``'s own layout must be preserved (it
     describes a reshape of the result), so its ``.data`` is repointed in
     place rather than the whole node being replaced.
+
+    A third read shape exists alongside graph outputs and ``.inputs``: an
+    outside ``ComputedBuffer`` consumer (e.g. online-softmax's final
+    ``acc / l``, computed from two carries' ``MultiOutput`` results) whose
+    ``inner_fn`` issues ``ops.load(old_name, index)`` directly -- a closure
+    over the name, not an object reference reachable via ``.inputs`` at all
+    (same class of hazard as the in-body carry reads this bridge already
+    redirects via ``redirect_computed_buffer_reads``/``NameSwapHandler``,
+    per CLAUDE.md's "wrap, never reconstruct" rule; see
+    ``splice_while_loop``'s own ``name_map`` rewrite for the body-side
+    counterpart of this same mechanism). Patch every such consumer still in
+    ``graph.operations`` the same way, or its dependency on ``old_name``
+    survives as a dangling ``graph.name_to_buffer`` lookup after
+    ``splice_while_loop`` drops the ``MultiOutput``/``WhileLoop`` objects
+    ``old_name`` and the while_loop itself named.
     """
     from torch._inductor import ir
+    from torch_spyre._inductor.pass_utils import redirect_computed_buffer_reads
 
     new_tb = ir.TensorBox(ir.StorageBox(new_buf))
 
@@ -528,13 +669,24 @@ def _repoint_refs_to_buffer(
         else:
             outputs[i] = new_tb
 
-    for op in graph.operations:
+    name_map = {old_name: new_buf.get_name()}
+    for i, op in enumerate(graph.operations):
         inputs = getattr(op, "inputs", None)
-        if not inputs:
-            continue
-        for i, inp in enumerate(inputs):
-            if getattr(inp, "get_name", lambda: None)() == old_name:
-                inputs[i] = new_tb
+        if inputs:
+            for j, inp in enumerate(inputs):
+                if getattr(inp, "get_name", lambda: None)() == old_name:
+                    inputs[j] = new_tb
+        if isinstance(op, ir.ComputedBuffer):
+            reads = {dep.name for dep in op.get_read_writes().reads}
+            if old_name in reads:
+                graph.operations[i] = redirect_computed_buffer_reads(
+                    op,
+                    name_map,
+                    graph.operations,
+                    pass_name="splice_while_loops",
+                    reason="redirect an outside consumer's carry read to "
+                    "the carry's real accumulator buffer",
+                )
 
 
 def splice_while_loop(
@@ -671,11 +823,30 @@ def splice_while_loop(
             # CarryBinding as the identity a future multi-buffer carry
             # scheme can build on, but is no longer what the rewrite targets.
             #
-            # The precondition the scratch redirect needed still holds and
-            # still matters: nothing else in the body may read this carry's
-            # per-iteration output, or the in-place write would be observed
-            # mid-update by a sibling op in the same trip.
-            _assert_body_output_not_read_elsewhere(body_output_name, body_ops)
+            # The in-place write below aliases this carry's new value onto
+            # its own initial buffer -- correct for PyTorch's while_loop
+            # semantics only as long as every OTHER read of this carry's
+            # placeholder (its OLD, pre-iteration value) has already
+            # happened, or is redirected to a snapshot taken before the
+            # write. Detect the WAR hazard precisely (an extra reader of
+            # placeholder_name, not of body_output_name -- see
+            # _extra_readers_of_placeholder's docstring) and only pay for a
+            # snapshot buffer when one is actually needed; the common case
+            # (e.g. split_k_fn's `acc + x @ y`, which reads the carry
+            # exactly once, in the producer itself) keeps today's single-
+            # buffer in-place path with no extra copy.
+            extra_readers = _extra_readers_of_placeholder(
+                placeholder_name, body_output_name, body_ops
+            )
+            if extra_readers:
+                body_ops = _snapshot_carry_placeholder(
+                    graph,
+                    placeholder_name,
+                    body_output_name,
+                    real_input,
+                    extra_readers,
+                    body_ops,
+                )
             body_ops = _rewire_accumulator_output(
                 graph, while_op, binding, body_ops, real_input
             )
