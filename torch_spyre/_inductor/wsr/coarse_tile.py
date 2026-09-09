@@ -81,6 +81,7 @@ from torch._inductor.ir import (
     IRNode,
     Layout,
     Loops,
+    MutableBox,
     MutationLayoutSHOULDREMOVE,
     Operation,
     Pointwise,
@@ -1808,12 +1809,15 @@ def _group_reduction_tiled_levels_in_group(
     for o in group_ops:
         if not isinstance(o, ComputedBuffer) or not isinstance(o.data, Reduction):
             continue
-        hint_id_to_reduction_ranges_pos: dict[int, int] = {
-            h.hint_id: pos
-            for h in getattr(o, "dim_hints", [])
-            if h.loop_var is not None and h.is_reduction
-            if (pos := _loop_var_to_reduction_ranges_pos(o, h.loop_var)) is not None
-        }
+        o_out = op_out_coords(o)
+        hint_id_to_reduction_ranges_pos: dict[int, int] = {}
+        for h in getattr(o, "dim_hints", []):
+            if h.loop_var is None:
+                continue
+            pos, resolved_is_reduction = _hint_ranges_pos(o, h, o_out)
+            if pos is None or not resolved_is_reduction:
+                continue
+            hint_id_to_reduction_ranges_pos[h.hint_id] = pos
         for level_idx, (hint_id, _count) in enumerate(levels):
             if hint_id in hint_id_to_reduction_ranges_pos:
                 reduction_levels.add(level_idx)
@@ -3291,7 +3295,10 @@ def _rebase_splice_write_offset(op: ComputedBuffer) -> None:
     loop_vars = _splice_loop_vars(op)
     if not loop_vars:
         return
-    target_layout = getattr(layout.target, "layout", None)
+    target = layout.target
+    while isinstance(target, MutableBox):
+        target = target.data
+    target_layout = getattr(target, "layout", None)
     if target_layout is None:
         return
     offset = sympy.sympify(target_layout.offset)

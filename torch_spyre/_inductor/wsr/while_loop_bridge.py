@@ -559,16 +559,21 @@ def splice_while_loop(
     (a ``ReinterpretView`` of the same buffer, already describing the folded
     shape) correct with no patching.
 
-    Carry rewiring (fill/rewrite/drain) for an ACCUMULATOR carry: each
-    CarryBinding's body_output is
-    redirected, via redirect_computed_buffer_reads, so any op inside the
-    spliced body that wrote the body subgraph's own carry placeholder now
-    writes carries[i].scratch_name instead -- the persistent buffer a future
-    fill/drain step will seed and read across iterations. No such fill step
-    exists yet anywhere in this codebase (carry_bindings_for only mints the
-    scratch_name identity; nothing materializes a real buffer under it) --
-    confirmed empirically, so redirecting a *read* to scratch_name today
-    would just trade one nonexistent-buffer failure for another.
+    Carry rewiring (fill/rewrite/drain) for an ACCUMULATOR carry: the body
+    op that writes this carry's per-iteration value is redirected in place,
+    via ``_rewire_accumulator_output``, to write the carry's own real
+    initial buffer instead of the body subgraph's placeholder --
+
+      fill    the initial buffer's own pre-loop producer (e.g. a zeros fill
+              for split_k_fn's ``torch.zeros(M, N)`` init)
+      rewrite this single spliced copy of the op reads the buffer and
+              writes it back in place, standing in for every trip
+      drain   the buffer itself IS the final value after the last trip, so
+              outside consumers read it directly
+
+    (see ``_rewire_accumulator_output``'s own comment for the full
+    rationale, including why this replaced an earlier ``scratch_name``
+    redirect that no buffer was ever materialized under).
 
     So the read side is handled per carry shape, distinguishing two cases by
     identity (confirmed against both split_m_fn and split_k_fn):
@@ -586,9 +591,10 @@ def splice_while_loop(
       reads the carry's pre-loop initial value, exactly as the first real
       iteration would -- so its read is aliased to
       while_op.carried_inputs[i] too, same as the pass-through case. Only
-      the *write* side (body_output) is redirected to scratch_name, per
-      the existing contract above, so a later fill/drain task has a stable
-      name to build on.
+      the *write* side (body_output) is redirected -- not to scratch_name,
+      but to the carry's own real initial buffer, via
+      _rewire_accumulator_output, per the fill/rewrite/drain mechanism
+      described above.
 
     Two distinct read shapes exist in the body and both need rewiring:
     ComputedBuffer.inner_fn issues ops.load(name, index) calls (name-based
@@ -710,9 +716,14 @@ def splice_while_loop(
     graph.operations[idx : idx + 1] = body_ops
 
     # Drop this while_op's MultiOutput children -- they read while_op's own
-    # (now-removed) buffer positionally; the caller redirects any real
-    # outside consumer to the relevant carry's scratch_name via the same
-    # name_map before/while removing them.
+    # (now-removed) buffer positionally. Any real outside consumer of a
+    # mutated ACCUMULATOR carry was already patched, above in
+    # _rewire_accumulator_output, to read the carry's real initial buffer
+    # directly (via while_out_name/_repoint_refs_to_buffer), so it no longer
+    # depends on this MultiOutput child by the time it is dropped here. A
+    # stacking carry's outside consumer never depended on one in the first
+    # place -- its ReinterpretView is already correct with no patching
+    # needed (see this docstring's opening paragraph).
     #
     # Verified against a live compiled graph (split_k_fn, which has a real
     # carry): each such child is an ir.MultiOutput ExternKernel whose own

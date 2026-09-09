@@ -641,7 +641,18 @@ def _assign_dim_hints_impl(operations: list[Operation]) -> None:
                 if name in reduction_dims:
                     coord_for_name[name] = sym
 
-        dim_hints = []
+        # Preserve any WhileLoop-splice-synthesized hints already stamped by
+        # for_each_tile_lowering.py's _synthesize_dim_hints_for_group
+        # (identified by loop_var_range is not None), the same as the
+        # `not op_hints` branch above -- this op may sit inside a real user
+        # spyre_hint() scope (op_hints non-empty) AND be a for_each_tile
+        # splice op at once, and the loop below must not be the only source
+        # of dim_hints in that case. The synthetic hint_id range
+        # (for_each_tile_lowering.py's _next_synthetic_hint_id_start =
+        # 1 << 30) and real user hint_ids are disjoint by construction, so no
+        # dedup is needed here.
+        existing = getattr(op, "dim_hints", None) or []
+        dim_hints = [h for h in existing if h.loop_var_range is not None]
         for hint_id, hint_dict in sorted(op_hints.items()):
             # A hint scope uses exactly one of tiles/slices/num_tiles_per_dim.
             dims: dict[str, int] = next(

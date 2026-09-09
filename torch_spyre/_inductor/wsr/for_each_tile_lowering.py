@@ -329,6 +329,7 @@ def _stacking_carry_indices(
     path untouched.
     """
     from torch._inductor import ir
+    from torch._inductor.ir import MutableBox
 
     body_graph = while_op.body_subgraph.graph
     placeholder_names = list(body_graph.graph_inputs.keys())
@@ -342,6 +343,8 @@ def _stacking_carry_indices(
         if not isinstance(layout, ir.MutationLayoutSHOULDREMOVE):
             continue
         target = layout.target
+        while isinstance(target, MutableBox):
+            target = target.data
         target_layout = getattr(target, "layout", None)
         if target_layout is None:
             continue
