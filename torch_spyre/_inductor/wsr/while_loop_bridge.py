@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from torch._inductor import ir
+    from torch._inductor.graph import GraphLowering
 
 
 @dataclasses.dataclass(frozen=True)
@@ -73,3 +74,62 @@ def carry_bindings_for(while_op: "ir.WhileLoop") -> list[CarryBinding]:
         )
         for i, initial in enumerate(carried_inputs)
     ]
+
+
+def splice_while_loop(
+    graph: "GraphLowering",
+    while_op: "ir.WhileLoop",
+    carries: list[CarryBinding],
+) -> list["ir.Operation"]:
+    """Replace while_op in graph.operations with its body subgraph's ops.
+
+    Carry rewiring (fill/rewrite/drain): each CarryBinding's body_output is
+    redirected, via redirect_computed_buffer_reads, so any op inside the
+    spliced body that read the body subgraph's own carry placeholder now
+    reads carries[i].scratch_name instead -- the persistent buffer that
+    survives across iterations. The caller is responsible for emitting the
+    actual fill (pre-loop seed) and drain (post-loop read) ops; this
+    function only rewires the body's internal reads/writes.
+
+    Returns the spliced body ops (graph.operations, still in topological
+    order) so the caller can build a coarse-tile (ops, levels) group from
+    them.
+    """
+    from torch_spyre._inductor.pass_utils import redirect_computed_buffer_reads
+
+    body_ops = list(while_op.body_subgraph.graph.operations)
+
+    name_map: dict[str, str] = {}
+    for binding in carries:
+        body_output_name = getattr(binding.body_output, "get_name", lambda: None)()
+        if body_output_name is not None:
+            name_map[body_output_name] = binding.scratch_name
+
+    if name_map:
+        body_ops = [
+            redirect_computed_buffer_reads(
+                op,
+                name_map,
+                body_ops,
+                pass_name="splice_while_loops",
+                reason="redirect while_loop carry reads to persistent scratch",
+            )
+            if hasattr(op, "data")
+            else op
+            for op in body_ops
+        ]
+
+    idx = graph.operations.index(while_op)
+    graph.operations[idx : idx + 1] = body_ops
+
+    # Drop this while_op's MultiOutput/MutationOutput children -- they read
+    # while_op's own (now-removed) buffer positionally; the caller redirects
+    # any real outside consumer to the relevant carry's scratch_name via the
+    # same name_map before/while removing them.
+    graph.operations = [
+        op
+        for op in graph.operations
+        if op is while_op or getattr(op, "_while_loop_parent", None) is not while_op
+    ]
+
+    return body_ops
