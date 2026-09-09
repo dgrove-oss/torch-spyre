@@ -62,5 +62,48 @@ class TestCarryBindingsFor(unittest.TestCase):
         self.assertEqual(bindings, [])
 
 
+class TestSpliceWhileLoop(unittest.TestCase):
+    def test_removes_while_op_and_inserts_body_ops(self):
+        import torch_spyre._inductor.wsr.while_loop_bridge as bridge
+
+        body_op_a = mock.Mock(name="body_op_a")
+        body_op_b = mock.Mock(name="body_op_b")
+        multi_output = mock.Mock(name="multi_output")
+
+        while_op = mock.Mock()
+        while_op.carried_inputs = []
+        while_op.body_subgraph.graph.graph_outputs = []
+        while_op.body_subgraph.graph.operations = [body_op_a, body_op_b]
+
+        graph = mock.Mock()
+        graph.operations = [mock.Mock(name="before"), while_op, multi_output]
+
+        spliced = bridge.splice_while_loop(graph, while_op, carries=[])
+
+        self.assertEqual(spliced, [body_op_a, body_op_b])
+        self.assertNotIn(while_op, graph.operations)
+        self.assertIn(body_op_a, graph.operations)
+        self.assertIn(body_op_b, graph.operations)
+
+    def test_splices_at_while_op_position(self):
+        import torch_spyre._inductor.wsr.while_loop_bridge as bridge
+
+        body_op = mock.Mock(name="body_op")
+        before = mock.Mock(name="before")
+        after = mock.Mock(name="after")
+
+        while_op = mock.Mock()
+        while_op.carried_inputs = []
+        while_op.body_subgraph.graph.graph_outputs = []
+        while_op.body_subgraph.graph.operations = [body_op]
+
+        graph = mock.Mock()
+        graph.operations = [before, while_op, after]
+
+        bridge.splice_while_loop(graph, while_op, carries=[])
+
+        self.assertEqual(graph.operations, [before, body_op, after])
+
+
 if __name__ == "__main__":
     unittest.main()
