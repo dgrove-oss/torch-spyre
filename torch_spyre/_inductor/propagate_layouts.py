@@ -29,6 +29,8 @@ from torch._inductor.ir import (
     FallbackKernel,
     FixedLayout,
     InputBuffer,
+    Layout,
+    MutableBox,
     MutationLayoutSHOULDREMOVE,
     MultiOutput,
     ReinterpretView,
@@ -1891,6 +1893,48 @@ def generic_layout(op: Operation) -> SpyreTensorLayout:
     output: FixedLayout = op.get_layout()
     # Concretize for C++ SpyreTensorLayout constructor.
     c_size = [concretize_expr(s) for s in output.size]
+    c_stride = [concretize_expr(s) for s in output.stride]
+    # SpyreTensorLayout's bare (size, dtype) constructor synthesizes its own
+    # row-major host strides from size alone (generic_stick_dim_order:
+    # identity [0, 1, ..., n-1], last dim = stick dim) -- it is blind to
+    # output.stride. That is correct for the overwhelming majority of ops and
+    # is deliberately left in place for them: making every op stride-aware
+    # changes layout selection graph-wide, and was confirmed to break
+    # test_building_blocks' causal-SDPA case, whose buf29 (a BROADCAST pad
+    # target, size=[4, 13, 128, 64] stride=[8192, 0, 1, 128]) relies on the
+    # blind identity order.
+    #
+    # The shape that needs more is a buffer with no memory reads of its own
+    # -- a constant_pad_nd zero-fill, which therefore never goes through
+    # compute_layouts/find_stick_compatible_input_layout (both of which do
+    # respect stride) -- that nonetheless carries a FixedLayout whose LAST
+    # dim is not its most-contiguous one, because it shares that layout with
+    # a real, later mutation write into the same buffer.
+    # test_map_mode_split_m hits exactly that: a transposed pad target,
+    # size=[6, 64] stride=[1, 6]. The blind constructor makes dim 1 the stick
+    # dim even though dim 0 is the contiguous one, and that combines with the
+    # mutation write's real index into an unrepresentable stick expression
+    # downstream ("Unexpected stick expression d0 + 2*(Mod(3*d1, 32))",
+    # raised out of _find_alt_target_stl's device_coordinates call).
+    #
+    # Two conditions keep this narrow, and together they separate the two
+    # cases above:
+    #   * no zero strides -- a broadcast layout is excluded, so SDPA's buf29
+    #     keeps the blind order it needs;
+    #   * the minimum stride is not already on the last dim -- i.e. the blind
+    #     order would pick the wrong stick dim. A natural/row-major layout
+    #     always fails this and is untouched.
+    # Then sort dims by decreasing stride (ties broken by original position)
+    # so the most-contiguous dim lands last as the stick dim, matching every
+    # other SpyreTensorLayout call site in this module (e.g.
+    # _all_constant_layouts, _make_output_stl).
+    if (
+        len(c_size) > 1
+        and all(s != 0 for s in c_stride)
+        and min(c_stride) != c_stride[-1]
+    ):
+        dim_order = sorted(range(len(c_size)), key=lambda d: (-c_stride[d], d))
+        return SpyreTensorLayout(c_size, c_stride, output.dtype, dim_order)
     return SpyreTensorLayout(c_size, output.dtype)
 
 
@@ -2530,6 +2574,112 @@ def propagate_spyre_tensor_layouts(
     _resolve_copy_back_candidates(operations)
 
 
+def _real_layout_matches_op_size(
+    node: ComputedBuffer, real: "FixedTiledLayout | FixedLayout"
+) -> bool:
+    """Is real_layout() actually usable as-is for this mutation op?
+
+    MutationLayoutSHOULDREMOVE.real_layout() == self.get_buffer().layout --
+    get_buffer() unwraps every BaseView (ReinterpretView included) and
+    MutableBox on the way to the underlying storage, via
+    unwrap_views/unwrap_view's `while isinstance(x, BaseView): x = x.data`
+    loop, which deliberately discards a ReinterpretView's own
+    size/stride/offset (that is the whole point of "unwrap"). That is only
+    safe when the mutation target is NOT sliced -- i.e. layout.target is a
+    bare pass-through box, so the underlying buffer's own layout already
+    describes exactly what this op writes.
+
+    When the target is instead a ReinterpretView (e.g. one tile of a
+    per-iteration-invariant while_loop operand -- confirmed via
+    test_map_mode_split_m/issue #3965, where the spliced body's own mutation
+    op writes only a `[2, 6]` tile of a `[4, 2, 6]` invariant buffer),
+    real_layout() silently returns the FULL underlying buffer's layout,
+    which does not match this op's own (smaller) write shape at all.
+    Detect that mismatch by comparing sizes: MutationLayoutSHOULDREMOVE's own
+    `size` was captured at construction time from `target.get_size()`
+    (Layout.__init__), i.e. the ReinterpretView's real per-op write size --
+    that is unaffected by any later substitution of what layout.target
+    points at, so it remains a reliable "what does this op actually write"
+    reference to compare against.
+    """
+    return list(node.get_layout().size) == list(real.size)
+
+
+def _clean_mutation_op_output_layout(node: ComputedBuffer) -> FixedLayout:
+    """Build a well-formed FixedLayout describing what this mutation op writes.
+
+    n.node.get_layout() (== the op's own MutationLayoutSHOULDREMOVE) cannot be
+    passed to compute_layouts() as-is when the target is sliced: `.size` is a
+    plain Layout attribute captured correctly at construction time (from the
+    ReinterpretView target's own FixedLayout), but `.stride` is a *property*
+    delegating to `self.real_layout().stride` -- i.e. the fully unwrapped
+    underlying buffer's stride, which (per _real_layout_matches_op_size's
+    docstring) can be a completely different rank/shape than this op's own
+    write when the target is a ReinterpretView slice. Feeding that
+    Frankenstein mix of "right size, wrong-rank stride" into compute_layouts
+    (which reads output.size AND output.stride, e.g. _single_arg_op_layout's
+    `c_stride = [concretize_expr(s) for s in output.stride]`) corrupts every
+    candidate layout it derives.
+
+    `.offset` is worse than stale -- it is simply never set.
+    MutationLayoutSHOULDREMOVE.__init__ calls
+    `super().__init__(device, dtype, size, None)`, a 4-positional-arg call
+    that never passes `offset`, so Layout.__init__'s own default
+    (`offset=Integer(0)`) always applies: `node.get_layout().offset` is
+    unconditionally 0, regardless of what the target actually points at.
+    When the target is a per-tile ReinterpretView (e.g. one map-mode tile of
+    a while_loop-invariant operand, confirmed via test_map_mode_split_m/
+    issue #3965), the *real* offset -- the one that places this tile within
+    the full underlying buffer -- lives on that ReinterpretView's own
+    `.layout.offset` (e.g. `12*u0`), not anywhere on the
+    MutationLayoutSHOULDREMOVE wrapper. Silently using 0 here made every
+    "iteration" of the coarse-tiled loop write to the same tile-0 location,
+    which is exactly the observed bug: real numeric output that is wrong but
+    does not crash, patterned along the tile boundaries.
+
+    So: walk `node.layout.target` past only MutableBox wrapping (never
+    BaseView/ReinterpretView unwrapping -- that is precisely the lossy step
+    real_layout()/get_buffer() takes and the one this function exists to
+    avoid) to find the first node with its own real Layout. If that layout's
+    size matches this op's write size, its offset (and stride, when rank
+    matches) is the real per-tile one and must be used. Otherwise (a bare
+    pass-through target with no distinguishing layout of its own) fall back
+    to this op's own size with natural contiguous strides and offset 0,
+    exactly like Layout.__init__'s own default
+    (`FlexibleLayout.contiguous_strides(size)`) uses when no stride is given.
+    """
+    from torch._inductor.ir import FlexibleLayout
+
+    size = list(node.data.get_size())
+
+    target = node.get_layout().target
+    while isinstance(target, MutableBox):
+        target = target.data
+    target_layout = getattr(target, "layout", None)
+    if isinstance(target_layout, Layout) and list(target_layout.size) == size:
+        offset = target_layout.offset
+        stride = target_layout.stride
+        if len(stride) == len(size):
+            return FixedLayout(
+                node.get_device(), node.get_dtype(), size, stride, offset
+            )
+        return FixedLayout(
+            node.get_device(),
+            node.get_dtype(),
+            size,
+            FlexibleLayout.contiguous_strides(size),
+            offset,
+        )
+
+    return FixedLayout(
+        node.get_device(),
+        node.get_dtype(),
+        size,
+        FlexibleLayout.contiguous_strides(size),
+        0,
+    )
+
+
 def propagate_mutation_layouts(
     nodes: list,
 ) -> list:
@@ -2549,18 +2699,29 @@ def propagate_mutation_layouts(
             continue
         if isinstance(n.node.data, (Pointwise, Reduction)):
             real = n.node.layout.real_layout()
-            if isinstance(real, FixedTiledLayout):
+            if isinstance(real, FixedTiledLayout) and _real_layout_matches_op_size(
+                n.node, real
+            ):
                 n.node.layout = real
             else:
                 rw = n.read_writes
                 output_dep = next(iter(rw.writes))
                 args = _get_prop_args(rw.reads)
-                output = n.node.get_layout()
+                output = _clean_mutation_op_output_layout(n.node)
                 layouts = list(compute_layouts(n.node, output, output_dep, args))
-                n.node.layout = layouts[0]
+                n.node.layout = FixedTiledLayout(
+                    output.device,
+                    output.dtype,
+                    output.size,
+                    output.stride,
+                    layouts[0],
+                    offset=output.offset,
+                )
         elif isinstance(n.node.data, Reduction):
             real = n.node.layout.real_layout()
-            if isinstance(real, FixedTiledLayout):
+            if isinstance(real, FixedTiledLayout) and _real_layout_matches_op_size(
+                n.node, real
+            ):
                 n.node.layout = real
             else:
                 logger.warning(

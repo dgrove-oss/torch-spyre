@@ -58,7 +58,11 @@ def split_k_fn(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         return acc + x_tile @ y_tile, None
 
     final, _ = for_each_tile(
-        body, (X, Y), dims=(-1, 0), tile_size=3, init=torch.zeros(M, N)
+        body,
+        (X, Y),
+        dims=(-1, 0),
+        tile_size=3,
+        init=torch.zeros(M, N, device=X.device, dtype=X.dtype),
     )
     return final
 
