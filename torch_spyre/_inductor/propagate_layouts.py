@@ -1889,7 +1889,10 @@ def _all_constant_layouts(op: Operation) -> list[SpyreTensorLayout]:
 
 
 def generic_layout(op: Operation) -> SpyreTensorLayout:
-    output: FixedLayout = op.get_layout()
+    return _generic_layout_for(op.get_layout())
+
+
+def _generic_layout_for(output: FixedLayout) -> SpyreTensorLayout:
     # Concretize for C++ SpyreTensorLayout constructor.
     c_size = [concretize_expr(s) for s in output.size]
     c_stride = [concretize_expr(s) for s in output.stride]
@@ -2707,7 +2710,16 @@ def propagate_mutation_layouts(
                 output_dep = next(iter(rw.writes))
                 args = _get_prop_args(rw.reads)
                 output = _clean_mutation_op_output_layout(n.node)
-                layouts = list(compute_layouts(n.node, output, output_dep, args))
+                if not args:
+                    # No propagatable args -- e.g. a constant_pad_nd fill whose only
+                    # read is a 0-d SpyreConstantFallback, skipped by _get_prop_args
+                    # because it has no meaningful STL. Mirrors the same fallback in
+                    # propagate_spyre_tensor_layouts's main loop; use the already
+                    # cleaned `output` (not n.node.get_layout(), which is still the
+                    # stale MutationLayoutSHOULDREMOVE at this point).
+                    layouts = [_generic_layout_for(output)]
+                else:
+                    layouts = list(compute_layouts(n.node, output, output_dep, args))
                 n.node.layout = FixedTiledLayout(
                     output.device,
                     output.dtype,
