@@ -522,10 +522,18 @@ def _snapshot_carry_placeholder(
     # `p @ v_tile` term makes it a FallbackKernel/MultiOutput pair, with the
     # MultiOutput carrying body_output_name. Match by name, not type, so
     # the snapshot lands before whichever op shape actually produces it.
+    # Check both get_operation_name() and get_name(), matching
+    # _extra_readers_of_placeholder's own _matches_body_output -- callers
+    # pass the same body_output_name to both functions, so a name that only
+    # resolves via one of the two accessors must still be found here.
     producer_idx = next(
         i
         for i, op in enumerate(body_ops)
-        if getattr(op, "get_name", lambda: None)() == body_output_name
+        if body_output_name
+        in (
+            getattr(op, "get_operation_name", lambda: None)(),
+            getattr(op, "get_name", lambda: None)(),
+        )
     )
     body_ops = list(body_ops)
     body_ops.insert(producer_idx, snapshot_buf)
