@@ -2587,24 +2587,34 @@ def _real_layout_matches_op_size(
     unwrap_views/unwrap_view's `while isinstance(x, BaseView): x = x.data`
     loop, which deliberately discards a ReinterpretView's own
     size/stride/offset (that is the whole point of "unwrap"). That is only
-    safe when the mutation target is NOT sliced -- i.e. layout.target is a
-    bare pass-through box, so the underlying buffer's own layout already
-    describes exactly what this op writes.
+    unsafe to reuse wholesale when the ReinterpretView's own placement is
+    tied to a *loop variable* -- i.e. its offset has free symbols -- because
+    then real_layout()'s full-underlying-buffer layout does not correspond
+    to any single fixed region this op actually writes across iterations
+    (e.g. one tile of a per-iteration-invariant while_loop operand --
+    confirmed via test_map_mode_split_m/issue #3965, where the spliced
+    body's own mutation op writes only a `[2, 6]` tile of a `[4, 2, 6]`
+    invariant buffer at an offset like `12*u0`).
 
-    When the target is instead a ReinterpretView (e.g. one tile of a
-    per-iteration-invariant while_loop operand -- confirmed via
-    test_map_mode_split_m/issue #3965, where the spliced body's own mutation
-    op writes only a `[2, 6]` tile of a `[4, 2, 6]` invariant buffer),
-    real_layout() silently returns the FULL underlying buffer's layout,
-    which does not match this op's own (smaller) write shape at all.
-    Detect that mismatch by comparing sizes: MutationLayoutSHOULDREMOVE's own
-    `size` was captured at construction time from `target.get_size()`
-    (Layout.__init__), i.e. the ReinterpretView's real per-op write size --
-    that is unaffected by any later substitution of what layout.target
-    points at, so it remains a reliable "what does this op actually write"
-    reference to compare against.
+    A *static* ReinterpretView slice (concrete, symbol-free offset) of a
+    buffer that already has its own committed FixedTiledLayout is not that
+    case: the op writes a fixed sub-region of a real, already-laid-out
+    buffer once (e.g. constant_pad_nd's fill/copy ops writing the pad strip
+    vs. the copied interior of the same padded output buffer), so
+    real_layout() -- the target buffer's own layout -- is exactly right to
+    reuse, size mismatch notwithstanding: this op's write is smaller than
+    the buffer only because it is one piece of it, not because real_layout()
+    picked the wrong tiling scheme.
     """
-    return list(node.get_layout().size) == list(real.size)
+    if list(node.get_layout().size) == list(real.size):
+        return True
+    target = node.get_layout().target
+    while isinstance(target, MutableBox):
+        target = target.data
+    target_layout = getattr(target, "layout", None)
+    if target_layout is None:
+        return False
+    return not sympy.sympify(target_layout.offset).free_symbols
 
 
 def _clean_mutation_op_output_layout(node: ComputedBuffer) -> FixedLayout:
@@ -2713,10 +2723,7 @@ def propagate_mutation_layouts(
                 if not args:
                     # No propagatable args -- e.g. a constant_pad_nd fill whose only
                     # read is a 0-d SpyreConstantFallback, skipped by _get_prop_args
-                    # because it has no meaningful STL. Mirrors the same fallback in
-                    # propagate_spyre_tensor_layouts's main loop; use the already
-                    # cleaned `output` (not n.node.get_layout(), which is still the
-                    # stale MutationLayoutSHOULDREMOVE at this point).
+                    # because it has no meaningful STL.
                     layouts = [_generic_layout_for(output)]
                 else:
                     layouts = list(compute_layouts(n.node, output, output_dep, args))
