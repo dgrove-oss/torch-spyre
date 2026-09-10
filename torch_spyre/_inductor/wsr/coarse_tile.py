@@ -1521,7 +1521,7 @@ def _tiled_dims_for_dep(
             len(ir_node.data.ranges) if hasattr(ir_node.data, "ranges") else 0
         )
         for hint in hints:
-            if hint.loop_var is None:
+            if hint.loop_var is None or hint.loop_var_range is None:
                 continue
             pos, is_reduction = _hint_ranges_pos(ir_node, hint, out_coords)
             if pos is None:
