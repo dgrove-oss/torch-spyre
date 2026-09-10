@@ -14,10 +14,14 @@
 
 """Minimal for_each_tile fixtures, vendored from torch-spyre#4136.
 
-torch-spyre#4136 (the for_each_tile frontend) is unmerged. These two cases --
-a pure map and a pure carry -- are trimmed from that PR's own test suite so
-tests/inductor/test_while_loop_lowering.py has a real `while_loop` FX node to
-drive through GraphLowering, without depending on the unmerged branch.
+torch-spyre#4136 (the for_each_tile frontend) is unmerged. These fixtures --
+a pure map, a pure carry, and an online-softmax multi-leaf carry -- are
+trimmed from that PR's own test suite so test_for_each_tile_lowering.py and
+test_for_each_tile_e2e.py have real `while_loop` FX nodes to drive, without
+depending on the unmerged branch.
+
+Not collected by pytest directly (no `test_` prefix, no CI config entry) --
+see tests/inductor/utils_inductor.py for the same pattern.
 """
 
 import contextlib

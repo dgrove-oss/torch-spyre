@@ -14,13 +14,17 @@
 
 """End-to-end Spyre-device tests for WhileLoop -> OpSpec/LoopSpec lowering.
 
+Compiles each fixture, runs it on the Spyre device, and compares against a
+CPU reference -- for IR-level / mocked-IR unit tests of the lowering
+machinery itself, see test_for_each_tile_lowering.py.
+
 Minimum coverage per docs/superpowers/specs/2026-09-09-while-loop-lowering-design.md:
 1. Single carry (this file: test_carry_mode_split_k) -- currently XFAIL on a
    read-copy/stick-layout gap; see that test's own docstring.
 2 (carry + Kind.SLICE tile-advancing input): covered implicitly by
    test_carry_mode_split_k, whose X/Y operands are both Kind.SLICE.
 4. Multiple independent carries: covered by test_carry_mode_online_softmax
-   (carry = (m, l, acc), an online-softmax flash-attention inner loop).
+   (carry = (m, denom, acc), an online-softmax flash-attention inner loop).
 Cases 3, 5, 6 (Kind.GATHER, nested for_each_tile, and the deliberate-decline
 case) are follow-on work -- tracked as open items rather than duplicated
 here, since each needs its own fixture beyond what's vendored so far.
@@ -38,7 +42,7 @@ import torch
 import torch_spyre  # noqa: F401  registers the "spyre" device
 from torch_spyre.constants import DEVICE_NAME
 
-from tests.inductor.test_for_each_tile_fixtures import (
+from tests.inductor.for_each_tile_fixtures import (
     attention_inputs,
     matmul_inputs,
     online_softmax_fn,
@@ -48,7 +52,7 @@ from tests.inductor.test_for_each_tile_fixtures import (
 )
 
 
-class TestWhileLoopLowering(unittest.TestCase):
+class TestForEachTileE2E(unittest.TestCase):
     # Spyre's matmul runs in fp16, so the reference has to be an fp16-faithful
     # one: cast the operands first, then accumulate in fp32 on CPU. Comparing
     # against the fp32 product of fp32 operands would fail on rounding alone,
@@ -120,7 +124,7 @@ class TestWhileLoopLowering(unittest.TestCase):
         )
 
     def test_carry_mode_online_softmax(self):
-        """Carry mode: 3-leaf carry (m, l, acc), online-softmax over K/V tiles.
+        """Carry mode: 3-leaf carry (m, denom, acc), online-softmax over K/V tiles.
 
         Case 4 (multiple independent carries) from the design spec's minimum
         coverage list. carry_bindings_for/splice_while_loop's per-binding loop
