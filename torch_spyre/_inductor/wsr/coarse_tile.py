@@ -1956,21 +1956,33 @@ def _loop_var_to_ranges_pos(out_coords: list, sym: sympy.Symbol) -> int | None:
     from a loop variable symbol to its data.ranges position, since dep var
     numbering skips size-1 dims while data.ranges does not.
 
-    Matches by coefficient (``coord.coeff(sym) != 0``), not by requiring sym
-    to be the coordinate's sole free symbol. Ordinarily a hint's loop_var
-    does occupy its own exclusive out_coords slot, so the two tests agree.
-    But a WhileLoop-splice loop_var (e.g. u0, see for_each_tile_lowering.py's
+    Matches if sym is the coordinate's sole free symbol (the ordinary
+    ``spyre_hint()`` case -- also covers a non-polynomial wrapper like
+    ``floor(h)``, whose ``.coeff(sym)`` is 0 even though sym is clearly its
+    only variable) OR sym has a nonzero coefficient in the coordinate (the
+    WhileLoop-splice case below). A coefficient-only test would silently
+    drop the ordinary case whenever compute_coordinates wraps a non-innermost
+    dim's coordinate in ``floor()``, which it does whenever the dim isn't
+    the fastest-varying one -- exactly span-overflow's tiled H dim (BHLD's
+    dim 1) in a real (non-test-stubbed) op_out_coords call, so this must stay
+    a two-way OR, not a coefficient-only test.
+
+    A WhileLoop-splice loop_var (e.g. u0, see for_each_tile_lowering.py's
     _synthesize_dim_hints_for_group) can share a device coordinate with an
     already-tiled ordinary dim when the spliced body's per-iteration advance
     lands in the same host dim as that dim's own tiling -- e.g. coordinate
     ``d0 + 2*u0`` for a 2-row-per-iteration write into a dim tiled to size 2
-    -- so requiring sym to be the ONLY free symbol never matches. Callers
-    that consume this position (_tiled_dims_for_dep's _dim_is_read) already
-    use the same coefficient test to decide whether a dependency reads a
-    dim, so this keeps the two symbol/pos mappings consistent.
+    -- so requiring sym to be the ONLY free symbol never matches that case;
+    the coefficient test is what catches it. Callers that consume this
+    position (_tiled_dims_for_dep's _dim_is_read) already use the same
+    coefficient test to decide whether a dependency reads a dim, so this
+    keeps the two symbol/pos mappings consistent for that case.
     """
     for i, coord in enumerate(out_coords):
-        if sym in coord.free_symbols and coord.coeff(sym) != 0:
+        free = coord.free_symbols
+        if sym not in free:
+            continue
+        if len(free) == 1 or coord.coeff(sym) != 0:
             return i
     return None
 
