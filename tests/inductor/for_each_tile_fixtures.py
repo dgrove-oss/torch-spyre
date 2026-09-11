@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Minimal for_each_tile fixtures, vendored from torch-spyre#4136.
+"""Minimal for_each_tile fixtures for while_loop-splice tests.
 
-torch-spyre#4136 (the for_each_tile frontend) is unmerged. These fixtures --
-a pure map, a pure carry, and an online-softmax multi-leaf carry -- are
-trimmed from that PR's own test suite so test_for_each_tile_lowering.py and
-test_for_each_tile_e2e.py have real `while_loop` FX nodes to drive, without
-depending on the unmerged branch.
+A pure map, a pure carry, and an online-softmax multi-leaf carry -- give
+test_for_each_tile_lowering.py and test_for_each_tile_e2e.py real
+`while_loop` FX nodes to drive via `for_each_tile`
+(torch_spyre._inductor.wsr.for_each_tile, landed in #4136).
 
 Not collected by pytest directly (no `test_` prefix, no CI config entry) --
 see tests/inductor/utils_inductor.py for the same pattern.
@@ -160,9 +159,10 @@ def _post_grad_graphs():
 
     post_grad_custom_post_pass fires BEFORE that decomposition, so a custom
     pass cannot see the while_loop node; wrapping the decomposition itself
-    can.
+    can. Inductor has no built-in hook for "give me the post-grad graph",
+    so this monkey-patches the (now permanent, #4136-landed) decomposition
+    function for the duration of one compile.
     """
-    # TODO: remove this monkey-patch when #4136 merges upstream.
     import torch._inductor.fx_passes.post_grad as pg
 
     seen: list[torch.fx.GraphModule] = []
