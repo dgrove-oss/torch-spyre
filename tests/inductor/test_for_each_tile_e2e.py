@@ -66,6 +66,10 @@ class TestForEachTileE2E(unittest.TestCase):
     # idiom the rest of the compiled-op suite uses (see
     # tests/inductor/test_inductor_matmul.py, whose inputs are constructed
     # `dtype=torch.float16` up front).
+    #
+    # rtol is the binding constraint here: operand/output magnitudes are
+    # O(1)-O(10), so rtol * |expected| dominates atol (which only matters
+    # near zero).
     ATOL = 0.1
     RTOL = 0.1
 
@@ -93,7 +97,7 @@ class TestForEachTileE2E(unittest.TestCase):
         distinct from everything this test's own lowering path needs -- the
         accumulator carry itself is wired correctly and WSR's own tiled-
         reduction accumulator (coarse_tile_fill/combine on the K level) picks
-        the K accumulation up as intended.
+        the K accumulation up as intended. Tracked as issue #4460.
 
         The gap: ``for_each_tile``'s ``xs`` leaves for ``dims=(-1, 0)`` are
         3-D, transposed, ``movedim``-derived views of the operands
