@@ -1893,42 +1893,32 @@ def generic_layout(op: Operation) -> SpyreTensorLayout:
 
 
 def _generic_layout_for(output: FixedLayout) -> SpyreTensorLayout:
+    # tl;dr: usually pick the blind identity stick-dim order; only override
+    # it for a FixedLayout whose most-contiguous dim isn't already last,
+    # since that's the one shape where the blind order is provably wrong.
+    #
     # Concretize for C++ SpyreTensorLayout constructor.
     c_size = [concretize_expr(s) for s in output.size]
     c_stride = [concretize_expr(s) for s in output.stride]
     # SpyreTensorLayout's bare (size, dtype) constructor synthesizes its own
-    # row-major host strides from size alone (generic_stick_dim_order:
-    # identity [0, 1, ..., n-1], last dim = stick dim) -- it is blind to
-    # output.stride. That is correct for the overwhelming majority of ops and
-    # is deliberately left in place for them: making every op stride-aware
-    # changes layout selection graph-wide, and was confirmed to break
-    # test_building_blocks' causal-SDPA case, whose buf29 (a BROADCAST pad
-    # target, size=[4, 13, 128, 64] stride=[8192, 0, 1, 128]) relies on the
-    # blind identity order.
+    # row-major host strides from size alone (identity dim order, last dim =
+    # stick dim) -- blind to output.stride. That's correct for the
+    # overwhelming majority of ops, including a BROADCAST layout (zero
+    # stride) like test_building_blocks' causal-SDPA buf29 -- so it's left
+    # in place except in the one case below.
     #
-    # The shape that needs more is a buffer with no memory reads of its own
-    # -- a constant_pad_nd zero-fill, which therefore never goes through
-    # compute_layouts/find_stick_compatible_input_layout (both of which do
-    # respect stride) -- that nonetheless carries a FixedLayout whose LAST
-    # dim is not its most-contiguous one, because it shares that layout with
-    # a real, later mutation write into the same buffer.
-    # test_map_mode_split_m hits exactly that: a transposed pad target,
-    # size=[6, 64] stride=[1, 6]. The blind constructor makes dim 1 the stick
-    # dim even though dim 0 is the contiguous one, and that combines with the
-    # mutation write's real index into an unrepresentable stick expression
-    # downstream ("Unexpected stick expression d0 + 2*(Mod(3*d1, 32))",
-    # raised out of _find_alt_target_stl's device_coordinates call).
-    #
-    # Two conditions keep this narrow, and together they separate the two
-    # cases above:
-    #   * no zero strides -- a broadcast layout is excluded, so SDPA's buf29
-    #     keeps the blind order it needs;
-    #   * the minimum stride is not already on the last dim -- i.e. the blind
-    #     order would pick the wrong stick dim. A natural/row-major layout
-    #     always fails this and is untouched.
-    # Then sort dims by decreasing stride (ties broken by original position)
-    # so the most-contiguous dim lands last as the stick dim, matching every
-    # other SpyreTensorLayout call site in this module (e.g.
+    # A FixedLayout can carry a non-monotonic stride whose last dim is NOT
+    # its most-contiguous one (e.g. it's shared with a later mutation write
+    # into the same buffer, as in test_map_mode_split_m's transposed pad
+    # target, size=[6, 64] stride=[1, 6]). There the blind order picks the
+    # wrong stick dim, producing an unrepresentable stick expression
+    # downstream ("Unexpected stick expression d0 + 2*(Mod(3*d1, 32))" out of
+    # _find_alt_target_stl's device_coordinates call). The two conditions
+    # below isolate exactly that case (no zero strides, so broadcast layouts
+    # like buf29 are excluded; min stride not already last, so a natural
+    # row-major layout is untouched) and sort dims by decreasing stride
+    # (ties by original position) so the most-contiguous dim lands last,
+    # matching every other SpyreTensorLayout call site in this module (e.g.
     # _all_constant_layouts, _make_output_stl).
     if (
         len(c_size) > 1
