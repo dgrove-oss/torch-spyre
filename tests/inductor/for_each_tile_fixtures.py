@@ -162,6 +162,7 @@ def _post_grad_graphs():
     pass cannot see the while_loop node; wrapping the decomposition itself
     can.
     """
+    # TODO: remove this monkey-patch when #4136 merges upstream.
     import torch._inductor.fx_passes.post_grad as pg
 
     seen: list[torch.fx.GraphModule] = []
