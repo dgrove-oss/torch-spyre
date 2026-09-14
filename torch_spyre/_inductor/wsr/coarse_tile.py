@@ -152,6 +152,7 @@ class _ReadCopyHoistDecision(enum.Enum):
     UNKNOWN_SOURCE = enum.auto()
     MISSING_STEP_METADATA = enum.auto()
     ADVANCING_READ = enum.auto()
+    UNRESOLVED_SPLICE_ADVANCE = enum.auto()
 
 
 class _ReadCopySourceKind(enum.Enum):
@@ -172,6 +173,9 @@ def _read_copy_hoist_decision(
     consumer_info: CoarseTileInfo,
     dep_idx: int,
     source_info: _ReadCopySourceInfo,
+    *,
+    dep: MemoryDep | None = None,
+    consumer_op: ComputedBuffer | None = None,
 ) -> _ReadCopyHoistDecision:
     """Classify whether a read sees the same source slice on every trip.
 
@@ -182,6 +186,17 @@ def _read_copy_hoist_decision(
     read-step metadata proves that the consumer's window does not advance.
     Reads synthesized after Pass 1 are outside this classifier's scope and
     must be validated by the pass that creates them.
+
+    ``dep``/``consumer_op`` enable one cross-check specific to a
+    WhileLoop-splice level, where the per-trip advance is a ``loop_var`` term
+    folded into ``dep.index`` rather than an iteration variable: if the index
+    mentions this level's ``loop_var``, the read DOES advance whatever the step
+    metadata says. Metadata that disagrees means ``_loop_var_pos_from_reads``
+    could not resolve the advance to a position (e.g. a stick-padded operand,
+    whose per-trip stride is the padded row width while the body reads only the
+    unpadded prefix). Reporting UNRESOLVED_SPLICE_ADVANCE lets the caller
+    decline the compile; ELIGIBLE would hoist the read and pin every trip to
+    tile 0 -- silently wrong output rather than an error.
     """
     if source_info.kind is _ReadCopySourceKind.LOOP_PRODUCED:
         if source_info.loop_group_id != consumer_info.loop_group_id:
@@ -214,6 +229,12 @@ def _read_copy_hoist_decision(
     )
     if any(per_level_dims) or any(per_level_squeezed):
         return _ReadCopyHoistDecision.ADVANCING_READ
+    if dep is not None and consumer_op is not None:
+        index = dep.index
+        if isinstance(index, sympy.Basic) and (
+            _splice_loop_vars(consumer_op) & index.free_symbols
+        ):
+            return _ReadCopyHoistDecision.UNRESOLVED_SPLICE_ADVANCE
     return _ReadCopyHoistDecision.ELIGIBLE
 
 
@@ -3681,6 +3702,9 @@ def _find_outside_consumers(
 def _full_buffer_read_deps(op: ComputedBuffer) -> list[MemoryDep]:
     """Return op's MemoryDep reads whose producer is outside op's own loop group.
 
+    Indirect (gather) reads are excluded -- they have no stageable tile; see
+    the `d.is_indirect()` branch below.
+
     A loop-internal op (own tile-sized layout) that reads a buffer produced
     outside its own outer loop group can never be made stick-compatible
     with it under AllSameNode: that producer's layout was fixed by a
@@ -3725,6 +3749,20 @@ def _full_buffer_read_deps(op: ComputedBuffer) -> list[MemoryDep]:
     reads = [d for d in op.get_read_writes().reads if isinstance(d, MemoryDep)]
     result = []
     for d in reads:
+        if d.is_indirect():
+            # A gather's pool read (`index = 256*d1 + ... + 32768*tmp0`, tmp0 the
+            # loaded page number) has no tile to stage: its window is whatever the
+            # index tensor names at runtime, and the gathered axis carries no
+            # iteration variable to size one from. Staging it pins the gather to
+            # pool row 0, since the copy's inner_fn substitutes only dep.var_names
+            # and tmp0 falls out as 0.
+            #
+            # Reading the pool directly needs no copy: the read is full-extent on
+            # every dim it does index, so unlike the tile-scoped reads this
+            # function intercepts, its index is already what the full-size buffer
+            # wants. (enforce_indirect_access_layout likewise expects the real
+            # pool.)
+            continue
         buf = V.graph.get_buffer(d.name)
         # Graph inputs are TensorBox(StorageBox(InputBuffer))-wrapped in
         # V.graph.get_buffer's result (see graph_inputs); unwrap to check.
@@ -4243,6 +4281,12 @@ def _rescale_index(
       falls back to a simplified quotient/difference check rather than
       relying on structural equality alone.
     """
+    # Callers mix sympy coefficients with plain Python ints (the `layout.stride`
+    # entries _patch_consumer_to_read_copy appends, for a fully static buffer).
+    # Everything below is sympy, so normalize once here rather than at each
+    # append site -- an int reaching _sort_key raised AttributeError.
+    full_strides = [sympy.sympify(stride) for stride in full_strides]
+    tile_strides = [sympy.sympify(stride) for stride in tile_strides]
 
     def _divides_evenly(term: Expr, full_stride: Expr) -> tuple[bool, Expr]:
         """Return (matched, loop_var_part) if `full_stride` divides `term`.
@@ -5506,8 +5550,22 @@ def _plan_read_copies(
                         operations_by_name,
                         loop_written_names,
                     ),
+                    dep=candidate_dep,
+                    consumer_op=candidate_op,
                 )
                 hoist_decisions.append(decision)
+                if decision is _ReadCopyHoistDecision.UNRESOLVED_SPLICE_ADVANCE:
+                    raise Unsupported(
+                        "_plan_read_copies: "
+                        f"{candidate_op.get_operation_name()!r}'s read of "
+                        f"{candidate_dep.name!r} advances with the spliced "
+                        f"loop (index {candidate_dep.index}) but coarse "
+                        "tiling could not resolve that advance to a tiled "
+                        "dim, so the read copy would be pinned to the first "
+                        "trip. This is the stick-padded-operand shape: give "
+                        "the tiled operand rows whose width equals what the "
+                        "loop body actually reads."
+                    )
                 logger.debug(
                     "coarse_tile: read-copy hoist decision consumer=%s "
                     "source=%s decision=%s",
