@@ -7860,6 +7860,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.compare_with_cpu(fn, x, diagonal)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @inductor_config.patch({"cpsat_time_limit_seconds": 30})
     def test_sdpa_cpu(self, q, k, v, attn_mask, is_causal, enable_gqa):
         def fn(q, k, v, attn_mask, is_causal, enable_gqa):
             return torch.nn.functional.scaled_dot_product_attention(

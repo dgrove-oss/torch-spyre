@@ -682,7 +682,10 @@ Environment Variables
        selection and the LX budget are unchanged. Unsupported ownership or
        insufficient space still uses HBM.
    * - ``CO_OPTIMIZING_LX_PLANNING``
-     - Use the co-optimizing LX allocator strategy (default ``0``)
+     - Use the co-optimizing LX allocator strategy (default ``1``)
+   * - ``CPSAT_TIME_LIMIT_SECONDS``
+     - Wall-clock budget for one CP-SAT solve (default ``120``; ``0``
+       disables the limit)
    * - ``HBM_POOL_PLANNING``
      - Enable HBM-pool planning for intermediates not in LX
        (default ``1``)

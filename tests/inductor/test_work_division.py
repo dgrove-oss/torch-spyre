@@ -30,6 +30,7 @@ from torch._inductor.ir import (
     Pointwise,
     Reduction,
 )
+from torch.utils._sympy.functions import ModularIndexing
 
 from torch_spyre._C import DataFormats, ElementArrangement, SpyreTensorLayout
 from torch_spyre._inductor.errors import Unsupported
@@ -67,6 +68,7 @@ from torch_spyre._inductor.work_division import (
 from torch_spyre._inductor.work_division_constraints import (
     ConstraintResult,
     WorkDivConstraintContext,
+    aligned_ownership_split_domains,
     collect_work_division_constraints,
     conv_spatial_blocked_vars,
     coordinate_mask_blocked_vars,
@@ -99,7 +101,7 @@ def _fixed_tiled_layout(shape, dtype=torch.float16, element_arrangement=None):
     device_layout = SpyreTensorLayout(size, stride, dtype, dim_order)
     if element_arrangement is not None:
         device_layout = device_layout.with_element_arrangement(element_arrangement)
-    return FixedTiledLayout("spyre:0", dtype, size, stride, device_layout)
+    return FixedTiledLayout(torch.device("spyre:0"), dtype, size, stride, device_layout)
 
 
 def _tensor_dep(name, shape, symbols, element_arrangement=None):
@@ -354,6 +356,42 @@ def _make_context(
         reduction_vars=list(reduction_vars),
         committed_splits=committed_splits or {},
     )
+
+
+class TestAlignedOwnershipSplitDomains(unittest.TestCase):
+    def _context(self, source_shape, source_index):
+        rows, cols = _isym("d0"), _isym("d1")
+        op = _computed_buffer((6, 128), name="repeat")
+        output_td = _tensor_dep("repeat", (6, 128), (rows, cols))
+        source = TensorDep(
+            dep=MemoryDep("x", source_index(rows, cols), (rows, cols), (6, 128)),
+            layout=_fixed_tiled_layout(source_shape),
+        )
+        ctx = _make_context(
+            op,
+            output_td,
+            [source],
+            it_space={rows: 6, cols: 128},
+            it_space_adjusted={rows: 6, cols: 2},
+            stick_vars={cols: 64},
+        )
+        return ctx, rows
+
+    def test_repeat_rows_split_only_into_whole_blocks(self):
+        # x.repeat(3, 2) over x of shape (2, 64): a 2-way row split would give
+        # core 0 output rows {0, 2, 4} after alignment.
+        ctx, rows = self._context(
+            (2, 64),
+            lambda d0, d1: 64 * ModularIndexing(d0, 1, 2) + ModularIndexing(d1, 1, 64),
+        )
+        result = aligned_ownership_split_domains(ctx)
+        self.assertEqual(result.allowed_splits[rows], frozenset({1, 3, 6}))
+        self.assertFalse(result.blocked)
+
+    def test_affine_read_leaves_rows_unconstrained(self):
+        ctx, rows = self._context((6, 128), lambda d0, d1: 128 * d0 + d1)
+        result = aligned_ownership_split_domains(ctx)
+        self.assertNotIn(rows, result.allowed_splits)
 
 
 class TestDirectReadSourceStickSplitDomains(unittest.TestCase):
@@ -1259,17 +1297,24 @@ class TestConvSpatialBlockedVars(unittest.TestCase):
             j,
         )
 
-    def test_blocks_spatial_dims_for_strided_conv(self):
-        ctx, i, j = self._context((2, 1))
+    def _blocked(self, ctx, i, j):
+        """Run the constraint against the (mb, out, i, j) output write ranges."""
         rw = MagicMock()
         # Inductor stores ranges in OrderedSet, which does not support slices.
         rw.writes = [MagicMock(ranges=(_isym("mb"), _isym("out"), i, j))]
         with patch(self._PATCH_TARGET, return_value=rw):
-            self.assertEqual(conv_spatial_blocked_vars(ctx).blocked, {i, j})
+            return conv_spatial_blocked_vars(ctx).blocked
+
+    def test_blocks_spatial_dims_for_strided_conv(self):
+        ctx, i, j = self._context((2, 1))
+        self.assertEqual(self._blocked(ctx, i, j), {i, j})
 
     def test_allows_spatial_dims_for_unstrided_conv(self):
-        ctx, _, _ = self._context((1, 1))
-        self.assertEqual(conv_spatial_blocked_vars(ctx).blocked, set())
+        # An unstrided conv splits spatially per-core, so nothing is blocked --
+        # including a collapsed (kernel-extent-1) axis, whose split is correct
+        # (see conv_spatial_blocked_vars).
+        ctx, i, j = self._context((1, 1))
+        self.assertEqual(self._blocked(ctx, i, j), set())
 
     def test_span_commit_conflicting_with_spatial_block_raises_unsupported(self):
         ctx, i, j = self._context((2, 1))

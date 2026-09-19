@@ -33,6 +33,8 @@ import torch
 import torch._dynamo
 import torch.nn.functional as F
 
+from torch_spyre._inductor import config
+
 from torch_spyre._inductor.decompositions import spyre_sliding_window_attention
 from torch_spyre._inductor.errors import Unsupported
 from utils_inductor import cached_randn, compare_with_cpu
@@ -326,6 +328,7 @@ class TestSlidingWindowAttention(unittest.TestCase):
         query, key, value = _inputs(1, 8, 8, 256, 256, head_dim=128)
         _compare_attention(query, key, value, 64)
 
+    @config.patch({"cpsat_time_limit_seconds": 30})
     def test_prefill_long(self):
         # 32 blocks — a long unrolled loop rather than a handful.
         query, key, value = _inputs(1, 8, 8, 2048, 2048)
