@@ -90,3 +90,49 @@ Always `rm -rf /tmp/torchinductor_$USER` before a run whose *logging
 output* matters, not just its return value — this is the same class of
 gotcha as stale test failures from the fxgraph cache; it bites capture
 scripts exactly like it bites test reruns.
+
+## `capture_for_each_tile_ir.py`
+
+The `for_each_tile` analog of `capture_coarse_tile_ir.py` above: regenerates
+every IR/OpSpec/`bundle.mlir` snippet quoted in
+[`docs/source/compiler/coarse_tiling_loops.md`](../source/compiler/coarse_tiling_loops.md)'s
+"Small Example" section for the `for_each_tile`-driven version of the
+example (`y = a + b; z = y * c`, tiled along dim 0 with `for_each_tile`
+instead of nested `spyre_hint` scopes).
+
+### Usage
+
+```bash
+rm -rf /tmp/torchinductor_$USER
+
+python3 docs/tools/capture_for_each_tile_ir.py > /tmp/for_each_tile_capture.txt 2>&1
+```
+
+This produces the same three sections as `capture_coarse_tile_ir.py` — the
+`graph.operations` IR dump, the generated OpSpec/LoopSpec Python wrapper
+source, and the generated `bundle.mlir` — but for the single-level loop
+`for_each_tile` stamps directly via `_stamp_direct_loop_info`, rather than
+the two-level nest `spyre_hint` produces.
+
+### Backend-compiler workaround
+
+`dbo-opt` is broken on this branch independent of anything `for_each_tile`
+touches, so this script mocks `subprocess.run` with `_fake_dbo_opt`, which
+writes an empty `spyrecode.json` directly instead of invoking the real
+backend compiler. `_run_backend_compiler` only checks for that file's
+existence to decide success, so this is sufficient to reach `bundle.mlir`
+generation without a working `dbo-opt` binary.
+
+### Options
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--tile-size` | `128` | `for_each_tile`'s `tile_size` |
+| `--size-a` | `1024` | Size of dim 0 |
+| `--size-b` | `4096` | Size of dim 1 |
+| `--sencores` | `4` | `SENCORES` value (kept small for the same reason as `capture_coarse_tile_ir.py` — see its Options section) |
+| `--debug` | off | Log at `DEBUG` instead of `INFO`; combine with `SPYRE_LOG_PASSES` for per-pass dumps, e.g. `SPYRE_LOG_PASSES=splice_while_loops` to see `loop_info` immediately after `for_each_tile`'s own stamping pass |
+
+As with `capture_coarse_tile_ir.py`, changing the shape flags means
+re-deriving every quoted numeric value in the doc from a fresh capture,
+not patching individual numbers by hand.

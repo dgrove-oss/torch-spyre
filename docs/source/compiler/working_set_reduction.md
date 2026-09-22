@@ -17,36 +17,21 @@ adopted in torch-spyre.
 **Quick navigation:**
 
 - [Approach](#approach)
-- [Working set reduction hints](#working-set-reduction-hints)
-- [Example 1: naming dimensions and tiling](#example-1-naming-dimensions-and-tiling)
-- [Dimensions vs. named dimensions](#dimensions-vs-named-dimensions)
-- [Example 2: view-based dimension splitting](#example-2-view-based-dimension-splitting)
+- [`for_each_tile`: an explicit, co-indexed tiling loop](#for_each_tile-an-explicit-co-indexed-tiling-loop)
+- [Example: tiling `y = a + b; z = y * c`](#example-tiling-y--a--b-z--y--c)
+- [Composing and nesting](#composing-and-nesting)
 - [Implementation](#implementation)
-  - [Intermediate representation](#intermediate-representation)
-  - [Lowering](#lowering)
-  - [Transformation](#transformation)
+- [Legacy frontend: `spyre_hint`](#legacy-frontend-spyre_hint)
 - [Related documents](#related-documents)
 
 ## Approach
 
 We intend to support both implicit (compiler generated) and explicit (source
-code driven) working set reduction. In the short term, the latter makes it
-possible to decouple the effort on working set reduction heuristics from
-downstream tasks (intermediate representations, analyses, and transformations).
-Eventually, the combination of the two can result in better performance and
-productivity than either solution in isolation.
-
-Explicit working set reduction can be decomposed in four stages:
-
-1. Introduce source-level hints on operations and tensors to drive working set
-   reduction.
-2. Introduce encodings of working set reduction decisions as metadata on LLIR
-   operations and buffers.
-3. Lower source-level hints to IR metadata.
-4. Transform the annotated IR into an executable program.
-
-Implicit working set reduction via compiler heuristics reuses stage 2 and
-beyond.
+code driven) working set reduction. Explicit working set reduction lets us
+decouple the effort on working set reduction heuristics from downstream tasks
+(intermediate representations, analyses, and transformations). Eventually, the
+combination of the two can result in better performance and productivity than
+either solution in isolation.
 
 The classic illustration is a matrix multiplication. Given `z = x @ y` with
 `x: [M, K]` and `y: [K, N]`, multiple tiling choices are valid: tile `x`
@@ -65,12 +50,207 @@ axes; each tile is independent. Option 4 tiles the reduction axis K and
 introduces an extra accumulation step.
 :::
 
-## Working set reduction hints
+The current explicit frontend for this is **`for_each_tile`**, a prototype
+higher-order op (torch-spyre#3965) that expresses a tiling loop directly at the
+source level, without a separate dimension-naming step. An older frontend,
+**`spyre_hint`**, is still supported and described in [Legacy frontend:
+`spyre_hint`](#legacy-frontend-spyre_hint) below, but new code should prefer
+`for_each_tile`.
 
-To explicitly control working set reduction, we name tensor dimensions and
-tile them.
+## `for_each_tile`: an explicit, co-indexed tiling loop
 
-## Example 1: Naming Dimensions and Tiling
+`for_each_tile` is `scan` with the tiling made explicit: **one co-indexed loop
+level** that reduces every operand to a per-step tile — a narrow view, a whole
+invariant, or a gathered pool row — threads an optional carry, and optionally
+lays each step's result tile back into a full-size output along one axis.
+
+```python
+def for_each_tile(
+    body,
+    operands,
+    *,
+    dims,
+    tile_size: int,
+    init=None,
+    out_dim=None,
+    reverse: bool = False,
+):
+    """Run `body` once per tile over a co-indexed tiling of `operands`.
+
+    Args:
+        body: ``(carry, tiles) -> (next_carry, out_tile)``. ``tiles`` arrives in
+            operand order, each operand already reduced to its per-step tile.
+            ``next_carry`` is ignored in map mode (``init=None``) and ``out_tile``
+            in reduction mode (``out_dim=None``). Same restriction as ``scan``:
+            the body may not alias input to output or output to output.
+        operands: flat sequence of every input -- sliced, gathered and invariant.
+        dims: per-operand tile spec as a tuple, or a single spec broadcast to all of
+            them. ``int d`` slices the operand into ``tile_size``-wide contiguous views
+            along ``d``; ``None`` passes it whole every step; ``Gather(axis, index)``
+            takes one pool row per step.
+        tile_size: the tile's size along each tiled axis. The loop's trip count is
+            derived: ``shape[dim] // tile_size`` per sliced operand, ``len(index)`` per
+            gathered one. All of them must agree.
+        init: carry init (tensor or pytree of tensors); ``None`` means no carry.
+        out_dim: ``int d`` lays step ``i``'s tile at ``narrow(d, i*extent, extent)``
+            of the returned output. ``None`` means the body emits no tile.
+        reverse: visit tiles high to low. The output still lands in natural order.
+
+    Returns:
+        ``(final_carry, out)``, either of which is ``None`` for the unused mode.
+    """
+```
+
+Unlike `spyre_hint`, there is no separate step to declare and name tensor
+dimensions before compiling: `dims=`/`tile_size=` directly describe the
+tiling of the arguments passed to `for_each_tile` itself, and the trip count
+is derived from the operand shapes rather than supplied by hand. Three kinds
+of operand are supported per the `dims` entry:
+
+- **Sliced** (`dims[i]` is an `int`): the operand is cut into `tile_size`-wide
+  contiguous views along that dimension; step `i` sees
+  `narrow(dim, i * tile_size, tile_size)`.
+- **Invariant** (`dims[i]` is `None`): the operand is passed whole, unchanged,
+  every step — the equivalent of an outer-level-invariant read in the
+  `spyre_hint` model.
+- **Gathered** (`dims[i]` is a `Gather(axis, index)`): step `i` sees one row
+  of a pool tensor, selected by `index[i]` along `axis`
+  (`pool.index_select(axis, index[i])`). This has no analog in the
+  `spyre_hint` frontend.
+
+`init`/`out_dim` cover the two directions data can cross the loop boundary
+that a purely elementwise tiling doesn't need: `init` threads a **carry**
+(e.g. a running accumulator) from one step to the next, and `out_dim` lays
+each step's output tile back into the correct slice of a full-size result.
+Either can be `None` independently — a pure reduction has no `out_dim`; a
+pure per-tile map has no `init`.
+
+## Example: tiling `y = a + b; z = y * c`
+
+The example below tiles the same computation used throughout this document's
+companion, [`coarse_tiling_loops.md`](coarse_tiling_loops.md) — but with
+`for_each_tile` instead of `spyre_hint`. `a`, `b`, `c` are `[1024, 4096]`
+tensors; the loop tiles dimension 0 into 8 steps of 128 rows each:
+
+```python
+from torch_spyre._inductor.wsr.for_each_tile import for_each_tile
+
+a = torch.randn(1024, 4096, dtype=torch.float16).to("spyre")
+b = torch.randn(1024, 4096, dtype=torch.float16).to("spyre")
+c = torch.randn(1024, 4096, dtype=torch.float16).to("spyre")
+
+def fn(a, b, c):
+    def body(_, tiles):
+        a_tile, b_tile, c_tile = tiles
+        y_tile = a_tile + b_tile
+        return None, y_tile * c_tile
+
+    _, z = for_each_tile(body, (a, b, c), dims=(0, 0, 0), tile_size=128, out_dim=0)
+    return z
+
+print(torch.compile(fn)(a, b, c))
+```
+
+All three operands are sliced along dimension 0 with the same `tile_size`, so
+the trip count is `1024 // 128 == 8`. `body` receives one `[128, 4096]` tile
+of each input per step, has no carry (`init=None`, so its first return value
+is ignored), and returns each step's `[128, 4096]` result tile, which
+`out_dim=0` lays into the corresponding `narrow(0, i*128, 128)` slice of the
+returned `[1024, 4096]` output.
+
+This is exactly the same tiling shape as the `spyre_hint`
+[Small Example](coarse_tiling_loops.md#small-example) in the companion
+document — a single loop, `y = a + b` then `z = y * c` — and it lowers to the
+same downstream mechanism (`loop_info: CoarseTileInfo`, a `CountedLoopSchedulerNode`,
+a `LoopSpec`). `docs/tools/capture_for_each_tile_ir.py` regenerates the real,
+captured IR/OpSpec/`bundle.mlir` for this exact example, which the
+[implementation reference](coarse_tiling_loops.md) quotes at length.
+
+## Composing and nesting
+
+`for_each_tile` expresses exactly **one** co-indexed loop level per call. A
+nested tiling loop nest — the `spyre_hint` model's stacked
+`with spyre_hint(...): with spyre_hint(...):` scopes — is expressed by
+composing two `for_each_tile` calls, with the inner call inside the outer
+call's `body`:
+
+```python
+def fn(a, b, c):
+    def outer_body(_, outer_tiles):
+        a_row, b_row, c_row = outer_tiles
+
+        def inner_body(_, inner_tiles):
+            a_tile, b_tile, c_tile = inner_tiles
+            y_tile = a_tile + b_tile
+            return None, y_tile * c_tile
+
+        _, z_row = for_each_tile(
+            inner_body, (a_row, b_row, c_row), dims=(1, 1, 1), tile_size=1024, out_dim=1
+        )
+        return None, z_row
+
+    _, z = for_each_tile(outer_body, (a, b, c), dims=(0, 0, 0), tile_size=512, out_dim=0)
+    return z
+```
+
+The compiler's lowering pipeline (see [Layer 1's Prove → Splice → Identify →
+Stamp
+sequence](coarse_tiling_loops.md#prove-splice-identify-stamp-how-a-for_each_tile-call-becomes-loop_info))
+runs to a fixed point over nested `for_each_tile`/`while_loop` structures, so
+this composition is handled uniformly rather than as a special case — see
+that section for how a two-level nest like this ends up with a two-entry
+`loop_group_id` on the innermost ops, analogous to the `spyre_hint` Small
+Example's `(0, 0)`.
+
+## Implementation
+
+`for_each_tile` is implemented as a thin frontend over PyTorch's `scan`
+higher-order op: it validates and normalizes `dims`/`tile_size` into the
+per-operand `TileSpec`s that decide how each operand is reduced to a tile
+(slice, gather, or pass through invariant), builds the `scan` body, and calls
+`torch._higher_order_ops.scan.scan`. This means a `for_each_tile` call reaches
+Inductor as an `ir.WhileLoop` (`scan`'s own lowering), not as a distinct
+"tiling loop" IR node in its own right.
+
+The Spyre backend's job is then to recognize which `ir.WhileLoop`s are
+provably bounded, tile-shaped loops — as opposed to genuinely
+data-dependent `while_loop`s, which stay as `ir.WhileLoop` — and rewrite them
+into the same `loop_info`-carrying representation the `spyre_hint` frontend
+produces. The mechanics of that recognition and rewrite (`try_prove_for_each_tile`,
+`splice_while_loops`, `_stamp_direct_loop_info`, and the surrounding carry
+machinery in `while_loop_bridge.py`) are described in detail in
+[`coarse_tiling_loops.md`](coarse_tiling_loops.md#layer-1--pre-scheduling-ir-pass),
+which both frontends share from that point on: everything past "a run of ops
+carries a `loop_info: CoarseTileInfo`" — the `CountedLoopSchedulerNode`
+scheduler wrapper (Layer 2) and the `LoopSpec` codegen tree (Layer 3) — is
+common machinery, indifferent to whether the `loop_info` came from
+`for_each_tile` or `spyre_hint`.
+
+## Legacy frontend: `spyre_hint`
+
+`spyre_hint` is an older, still-supported explicit frontend that names tensor
+dimensions up front and tiles them via nested context managers, rather than
+expressing the tiling loop directly at the call site. New code should prefer
+`for_each_tile`; this section remains for code that still uses `spyre_hint`
+and for understanding the hint-driven half of the compiler pipeline.
+
+Explicit working set reduction via `spyre_hint` is decomposed in four stages:
+
+1. Introduce source-level hints on operations and tensors to drive working set
+   reduction.
+2. Introduce encodings of working set reduction decisions as metadata on LLIR
+   operations and buffers.
+3. Lower source-level hints to IR metadata.
+4. Transform the annotated IR into an executable program.
+
+Implicit working set reduction via compiler heuristics reuses stage 2 and
+beyond, and this is also where `for_each_tile` rejoins the pipeline: it
+produces the stage-2 IR metadata directly, skipping stages 1 and 3.
+
+To explicitly control working set reduction with `spyre_hint`, we name tensor
+dimensions and tile them.
+
+### Example: naming dimensions and tiling
 
 ```python
 M, K, N = 64, 256, 128
@@ -116,8 +296,7 @@ still parse but are deprecated and will be removed in a future release.
 
 A single `spyre_hint(...)` call accepts at most one tiling keyword, and the
 dictionary names at most one dimension. To tile two dimensions, nest two
-hint scopes, as in
-[Example 1](#example-1-naming-dimensions-and-tiling) above:
+hint scopes, as in the example above:
 
 ```python
 def kernel(x, y, z):
@@ -141,7 +320,7 @@ with spyre_hint(named_dims=["M", "N"]):
 Named tensor dimensions must be provided for inputs to `torch.compile` but
 are intended to be derived most of the time for computed tensors.
 
-## Dimensions vs. named dimensions
+### Dimensions vs. named dimensions
 
 Named dimensions are deliberately distinct from tensor shape:
 
@@ -166,7 +345,7 @@ This separation is what allows hints to refer to logical axes (`"M"`,
 `"K"`, `"N"`) regardless of whether intermediate views have collapsed or
 re-shaped them.
 
-## Example 2: View-Based Dimension Splitting
+### Example: view-based dimension splitting
 
 Named tensor dimensions are intended to reflect the tensor layout in memory.
 For instance, the following code is valid:
@@ -201,9 +380,7 @@ as for instance with named dimensions `["A", "B", "C", "D"]` for `x` and
 `["C", "D", "E"]` for `y`. In this example, the reduction dimension is the
 flattened dimension `["C", "D"]`.
 
-## Implementation
-
-### Intermediate representation
+### `spyre_hint` intermediate representation
 
 Hints are automatically assigned a unique id.
 
@@ -252,7 +429,7 @@ Operations inherit every enclosing hint, and the partial order on ids
 recovers the nesting tree.
 :::
 
-### Lowering
+### `spyre_hint` lowering
 
 Spyre hints are captured on the FX graph using the
 `torch.fx.traceback.annotate` context manager and preserved through AOT
@@ -271,12 +448,12 @@ This is implemented by the `propagate_named_dims` pass.
 In most cases, tracking dimension names through operations is
 straightforward. The primary complexity comes from handling views,
 particularly views that split or combine dimensions, as shown in
-[Example 2](#example-2-view-based-dimension-splitting).
+[Example: view-based dimension splitting](#example-view-based-dimension-splitting).
 
 The current implementation assumes that when a view splits a dimension, the
 input tensor's corresponding dimension already contains the necessary number
-of dimension names with compatible sizes (for example, `["M", "K"]` in
-Example 2). Named dimensions are propagated through intermediate tensors
+of dimension names with compatible sizes (for example, `["M", "K"]` in that
+example). Named dimensions are propagated through intermediate tensors
 and aligned to tensor dimensions using stride-based analysis, ensuring
 correctness under view transformations.
 
@@ -293,9 +470,14 @@ elimination, **before** stickification — it only needs host-side
 to wait for device layouts. A span-overflow half runs later, after
 stickification, because it needs `FixedTiledLayout.device_layout` (device
 size, stride map) to detect and correct spans that overflow the hardware
-memory budget. Both halves still run before work-division and scratchpad
-planning consume the resulting iteration spaces: work-division must see the
-post-tiling iteration space regardless of which half produced it. See
+memory budget. `for_each_tile`'s own `splice_while_loops` pass runs earlier
+still — before dead-code elimination — since it must resolve every
+`for_each_tile`-shaped `ir.WhileLoop` down to a `loop_info`-carrying group
+before the hint-driven half's grouping and dead-code elimination can see a
+flat op list. Both hint-driven halves still run before work-division and
+scratchpad planning consume the resulting iteration spaces: work-division
+must see the post-tiling iteration space regardless of which frontend or
+which half produced it. See
 [`coarse_tiling_loops.md`](coarse_tiling_loops.md#groups-derivation-and-placement-in-custompreschedulingpasses)
 for the full pass ordering and the rationale for the two-slot split
 (issue #3135).
@@ -312,12 +494,13 @@ metadata across retracing.
 
 ### Transformation
 
-The annotated IR is transformed into a tiled loop nest by the
-**coarse-tiling** pass. Each contiguous run of operations sharing the same
-tiling decision is rewritten with reduced per-iteration ranges, wrapped in a
-counted loop, and emitted as nested `LoopSpec` structures that the SuperDSC
-codegen lowers to hardware MLIR (`scf.for` + `affine.apply` +
-`sdsc_execute`).
+The annotated IR — whether produced by `spyre_hint`'s hint-driven passes or by
+`for_each_tile`'s direct-stamping pipeline — is transformed into a tiled loop
+nest by the **coarse-tiling** machinery. Each contiguous run of operations
+sharing the same tiling decision is rewritten with reduced per-iteration
+ranges, wrapped in a counted loop, and emitted as nested `LoopSpec` structures
+that the SuperDSC codegen lowers to hardware MLIR (`scf.for` + `affine.apply`
+- `sdsc_execute`).
 
 The reduction in working set is what makes intermediates fit in LX
 scratchpad: an intermediate buffer that is produced and consumed inside the
@@ -337,25 +520,30 @@ The full mechanics — how loop identity is carried through Inductor's
 flat-list pipeline, how the loop perimeter prevents cross-group fusion, how
 buffers crossing the loop boundary are classified — are documented in
 [`coarse_tiling_loops.md`](coarse_tiling_loops.md). The design rationale
-for those mechanics is in [RFC 1358: Coarse
+for the `spyre_hint`-era mechanics is in [RFC 1358: Coarse
 Tiling](https://github.com/torch-spyre/rfcs/blob/main/1358-CoarseTiling/1358-CoarseTiling.md).
 
-A buffer that crosses the loop boundary and is *not* marked
-`per_tile_fixed` (see [`coarse_tiling_loops.md`](coarse_tiling_loops.md))
-advances its base address once per loop iteration, so its HBM pool
-allocation must be sized for every tile it will occupy across the loop's
-run, not just one. `hbm_pool_planning.py`'s `_compute_size_bytes` sizes each
-buffer from its full `FixedTiledLayout.device_layout.device_size`, which
+A buffer that crosses the loop boundary and has a non-empty
+`output_tiled_dims`/`tiled_dims_per_read` entry at a given level (see
+[`coarse_tiling_loops.md`](coarse_tiling_loops.md#attribute-contract-on-iroperation))
+advances its base address once per loop iteration at that level, so its HBM
+pool allocation must be sized for every tile it will occupy across the
+loop's run, not just one. `hbm_pool_planning.py`'s `_compute_size_bytes` sizes
+each buffer from its full `FixedTiledLayout.device_layout.device_size`, which
 spans every tile the buffer occupies across the loop; sizing it for a single
 tile would let the loop overrun into whatever buffer the allocator packed
-next to it. See [`coarse_tiling_loops.md`](coarse_tiling_loops.md) for the
-`accum_full` / `accum_tile` buffers this sizing matters most for.
+next to it. A buffer whose `output_tiled_dims`/`tiled_dims_per_read` entries
+are empty at every level, by contrast, never advances and is a candidate for
+a fixed-address LX scratchpad slot instead — see
+[`coarse_tiling_loops.md`](coarse_tiling_loops.md) for the `accum_full` /
+`accum_tile` buffers this distinction matters most for.
 
 ## Related documents
 
 - [`coarse_tiling_loops.md`](coarse_tiling_loops.md) — implementation
   reference for the transformation stage (Layer 1 IR pass, Layer 2
-  scheduler wrapper, Layer 3 codegen tree).
+  scheduler wrapper, Layer 3 codegen tree), covering both the
+  `for_each_tile` and `spyre_hint` paths into `loop_info`.
 - [RFC 1358: Coarse-Tiling Loop IR Design
   Rationale](https://github.com/torch-spyre/rfcs/blob/main/1358-CoarseTiling/1358-CoarseTiling.md),
   which explains the reasoning behind the three-layer design.
