@@ -43,6 +43,11 @@ and update the doc's prose/snippets to match reality — do not hand-edit the
 doc's existing snippets by inference; the compiler internals drift often
 enough that guessing is how the doc goes stale in the first place.
 
+Like `capture_for_each_tile_ir.py` below, this script mocks `subprocess.run`
+with a local `_fake_backend_compiler` rather than invoking the real
+`dbo-opt` — see that script's "Backend-compiler mock" section for why a bare
+mock with no side effect is not sufficient.
+
 ### Capturing a single pass's output
 
 To see the `CoarseTileInfo` state immediately after `coarse_tile()` stamps
@@ -114,14 +119,20 @@ source, and the generated `bundle.mlir` — but for the single-level loop
 `for_each_tile` stamps directly via `_stamp_direct_loop_info`, rather than
 the two-level nest `spyre_hint` produces.
 
-### Backend-compiler workaround
+### Backend-compiler mock
 
-`dbo-opt` is broken on this branch independent of anything `for_each_tile`
-touches, so this script mocks `subprocess.run` with `_fake_dbo_opt`, which
+This script mocks `subprocess.run` with `_fake_backend_compiler`, which
 writes an empty `spyrecode.json` directly instead of invoking the real
-backend compiler. `_run_backend_compiler` only checks for that file's
-existence to decide success, so this is sufficient to reach `bundle.mlir`
-generation without a working `dbo-opt` binary.
+`dbo-opt` binary — the same local reimplementation of the test suite's
+`mock_backend_compiler()` fixture (`tests/inductor/utils_inductor.py`) that
+`capture_coarse_tile_ir.py` uses, kept as a local copy here since
+`docs/tools/` cannot import from `tests/`. Since PR #4708 made the
+`spyreCodeDir/spyrecode.json` artifact check unconditional — a real backend
+compiler can exit 0 without writing it, so `_run_backend_compiler` never
+trusted the exit code alone — a bare `mock_patch("subprocess.run")` with no
+side effect fails that check even though the mocked subprocess "succeeded."
+`_fake_backend_compiler` writes the artifact itself so the capture can reach
+`bundle.mlir` generation without needing a working `dbo-opt` binary at all.
 
 ### Options
 

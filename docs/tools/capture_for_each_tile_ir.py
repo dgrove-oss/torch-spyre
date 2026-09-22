@@ -55,12 +55,15 @@ _PREPARE_KERNEL = "torch_spyre.execution.kernel_runner.prepare_kernel"
 DEVICE = torch.device("spyre")
 
 
-def _fake_dbo_opt(cmd, *args, **kwargs):
-    """Stand in for the real dbo-opt binary: this capture only needs
+def _fake_backend_compiler(cmd, *args, **kwargs):
+    """Stand in for the real ``dbo-opt`` binary: this capture only needs
     ``bundle.mlir`` (already on disk by the time dbo-opt would run), not a
     working device binary. ``_run_backend_compiler`` treats the presence of
     ``spyreCodeDir/spyrecode.json`` -- not the mocked return code -- as its
-    success signal, so the mock must create that file itself.
+    success signal (a real backend compiler can exit 0 without writing it,
+    per issue #3651), so the mock must create that file itself. A bare
+    ``mock_patch("subprocess.run")`` with no side effect fails this check
+    and is not sufficient since PR #4708 made the check unconditional.
     """
     export_dir = next(
         arg.split("=", 1)[1] for arg in cmd if arg.startswith("--export-dir=")
@@ -154,7 +157,7 @@ def main() -> None:
         with (
             mock_patch(_LAUNCH_JOBPLAN),
             mock_patch(_PREPARE_KERNEL),
-            mock_patch("subprocess.run", side_effect=_fake_dbo_opt),
+            mock_patch("subprocess.run", side_effect=_fake_backend_compiler),
         ):
             _, source_codes = run_and_get_code(cfn, a_dev, b_dev, c_dev)
 
