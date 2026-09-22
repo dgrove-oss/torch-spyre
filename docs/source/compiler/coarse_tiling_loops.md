@@ -99,9 +99,9 @@ processes a 128 × 4096 tile (1/8th of the full tensor), enabling the
 intermediate result `y_tile` to remain in scratchpad across both operations
 within the tile. Unlike the nested `spyre_hint` example this section used to
 show, there is only one loop level here — `for_each_tile` expresses one loop
-level per call (see [Composing and nesting](../working_set_reduction.md) in
-`working_set_reduction.md` for how a second, nested level is built by calling
-`for_each_tile` again inside `body`).
+level per call (see [Composing and nesting](working_set_reduction.md#composing-and-nesting)
+in `working_set_reduction.md` for how a second, nested level is built by
+calling `for_each_tile` again inside `body`).
 
 This example is exactly what `docs/tools/capture_for_each_tile_ir.py`
 compiles. Every IR/OpSpec/`bundle.mlir` snippet below is real, captured
@@ -280,12 +280,12 @@ Key points worth reading closely:
   `MutationLayoutSHOULDREMOVE` over the full `[1024, 4096]` shape; see
   [MutationLayoutSHOULDREMOVE: the real contract](#mutationlayoutshouldremove-the-real-contract).
 - `output_tiled_dims=[[]]` for both `op8` and `op9` (empty at the only
-  level) means neither's own small buffer advances (see
-  [LoopLevel IR](#looplevel-ir-after-custompreschedulingpasses) below for the
-  general dim-omission convention): `_general_tile_advance` substitutes `0`
-  for the omitted dim and returns `None`, which is what lets
-  `scratchpad_planning` place both in `lx` (`op8` at offset `0`, `op9` at
-  offset `262144`) instead of falling back to `hbm_pool`.
+  level) means neither's own small buffer advances (see the dim-omission
+  convention in [Attribute contract on `ir.Operation`](#attribute-contract-on-iroperation)
+  below): `_general_tile_advance` substitutes `0` for the omitted dim and
+  returns `None`, which is what lets `scratchpad_planning` place both in
+  `lx` (`op8` at offset `0`, `op9` at offset `262144`) instead of falling
+  back to `hbm_pool`.
 - `op15`'s `output_tiled_dims=[[(0, 128)]]` is non-empty — its
   `MutationLayoutSHOULDREMOVE` target (`z`) does advance by 128 rows per
   iteration.
@@ -635,7 +635,7 @@ bypass this:
 object.__setattr__(data, "ranges", ranges)
 ```
 
-### Public API: `coarse_tile_pre_stickify()` / `coarse_tile_post_stickify()`
+### Public API: `coarse_tile_pre_stickify` and `coarse_tile_post_stickify`
 
 ```python
 def coarse_tile_pre_stickify(
@@ -1488,7 +1488,7 @@ is rejected outright, before any IR mutation happens.
 
 **Detection, not propagation.** `plan_coarse_tile_groups` (the planning
 phase — see
-[Public API](#public-api-coarse_tile_pre_stickify-coarse_tile_post_stickify)) calls
+[Public API](#public-api-coarse_tile_pre_stickify-and-coarse_tile_post_stickify)) calls
 `_seed_buffer_for_carry` on every op that is loop-invariant at the group's
 reduction-tiled level(s) (`_plan_is_loop_invariant_at_reduction_levels`
 gates this call). If `_seed_buffer_for_carry` identifies `op` as the
