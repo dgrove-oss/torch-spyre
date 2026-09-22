@@ -171,11 +171,9 @@ below) and every later pass (`split_multi_ops`,
 `_distribute_work`, `_maybe_scratchpad_planning`) has run,
 `graph.operations` contains three tiled ops living inside the spliced loop
 body, plus a `buf4` placeholder for the eventual output `z` (created earlier
-by Dynamo's `getitem_3`/`empty_strided`, analogous to the hint-driven
-example's `op5`/`SpyreEmptyFallback`). This is the real, unedited output of
+by Dynamo's `getitem_3`/`empty_strided`). This is the real, unedited output of
 `format_operations(graph.operations)` at `sencores=4`, in topological order,
-using `u0` as the `inner_fn` index variable for the tiled dim (in place of
-`i0`/`d0` in the hint-driven example):
+using `u0` as the `inner_fn` index variable for the tiled dim:
 
 ```
 buf4: ComputedBuffer                              # placeholder for z
@@ -249,55 +247,48 @@ while_loop_body_graph_0_0_op15: ComputedBuffer    # identity copy: z_tile → z
 ```
 
 This example uses `sencores=4` (rather than the default 32) purely for
-readability, same as the hint-driven example this section replaces.
+readability.
 
-Key points — and the structural differences from the hint-driven example
-above are the ones worth reading closely:
+Key points worth reading closely:
 
-- **There are no separate read-copy ops.** This is the headline difference
-  from the hint-driven `coarse_tile_pre_stickify()` path: `op8` and `op9` load directly
+- **There are no separate read-copy ops.** `op8` and `op9` load directly
   from the full-tensor graph inputs (`arg0_1`, `arg1_1`, `arg2_1`) with the
   tile advance baked straight into their own index expression
   (`i1 + 4096 * i0 + 524288 * u0` — the `524288 * u0` term is the per-tile
-  row advance, `128 * 4096`). The hint-driven path's
+  row advance, `128 * 4096`). The `coarse_tile_pre_stickify()` path's
   `_full_buffer_read_deps`/`_insert_all_read_copy_ops` machinery, which
   exists specifically to give a tiled op a tile-sized *copy* of a full-buffer
   read (see [Read-side adaptation](#read-side-adaptation-full-buffer-inputs-to-a-loop-internal-op)
   below), simply never runs on this path: `for_each_tile`'s own tracing
   through `scan` already produces per-tile-sized reads of `a`/`b`/`c`
   directly, with no full-size intermediate buffer for a copy op to adapt.
-- **`u0` plays the same role `i0`/`d0` play in the hint-driven example**: it
-  is the (spliced-in) loop induction variable, and it appears explicitly in
-  the read index expressions above (`524288 * u0`) rather than being folded
-  away into a separately-tracked `tiled_symbols` structure at this IR stage
-  — that folding happens later, in codegen (see the OpSpec section below).
+- **`u0` is the (spliced-in) loop induction variable**, and it appears
+  explicitly in the read index expressions above (`524288 * u0`) rather than
+  being folded away into a separately-tracked `tiled_symbols` structure at
+  this IR stage — that folding happens later, in codegen (see the OpSpec
+  section below).
 - `op9`'s read of `op8`'s output (`while_loop_body_graph_0_0_buf8`) uses
   coefficient `4096`, matching `op8`'s own per-tile `FixedTiledLayout` with
-  `stride=[4096, 1]` — the same "read a tile-local producer at its own
-  per-tile stride" pattern the hint-driven example's `buf1`-reads-`buf0` case
-  demonstrates, just without the `_patch_retiled_load_indexes` involvement
-  that case needed (there is no separate full-size-then-divided buffer here
-  to retile).
+  `stride=[4096, 1]` — the "read a tile-local producer at its own per-tile
+  stride" pattern, without any `_patch_retiled_load_indexes` involvement
+  (there is no separate full-size-then-divided buffer here to retile).
 - All three ops share `loop_group_id=(0,)` and `loop_count=[8]` — this is
   what `build_loop_scheduler_nodes` uses to wrap them together in a single
-  `CountedLoopSchedulerNode`, exactly as in the hint-driven path.
+  `CountedLoopSchedulerNode`.
   `while_loop_body_graph_0_0_op15` (the identity copy that drains
   `op9`'s tile into `z`) is tiled the same way even though its own layout is
-  `MutationLayoutSHOULDREMOVE` over the full `[1024, 4096]` shape — the same
-  mechanism the hint-driven `coarse_tile_copy_buf1` uses; see
+  `MutationLayoutSHOULDREMOVE` over the full `[1024, 4096]` shape; see
   [MutationLayoutSHOULDREMOVE: the real contract](#mutationlayoutshouldremove-the-real-contract).
 - `output_tiled_dims=[[]]` for both `op8` and `op9` (empty at the only
-  level) means neither's own small buffer advances — same dim-omission
-  convention as the hint-driven path (see
+  level) means neither's own small buffer advances (see
   [LoopLevel IR](#looplevel-ir-after-custompreschedulingpasses) below for the
-  general rule): `_general_tile_advance` substitutes `0` for the omitted dim
-  and returns `None`, which is what lets `scratchpad_planning` place both in
-  `lx` (`op8` at offset `0`, `op9` at offset `262144`) instead of falling
-  back to `hbm_pool`.
+  general dim-omission convention): `_general_tile_advance` substitutes `0`
+  for the omitted dim and returns `None`, which is what lets
+  `scratchpad_planning` place both in `lx` (`op8` at offset `0`, `op9` at
+  offset `262144`) instead of falling back to `hbm_pool`.
 - `op15`'s `output_tiled_dims=[[(0, 128)]]` is non-empty — its
   `MutationLayoutSHOULDREMOVE` target (`z`) does advance by 128 rows per
-  iteration, the same role `coarse_tile_copy_buf1` plays in the hint-driven
-  example.
+  iteration.
 
 ### Generated OpSpec (Python wrapper source)
 
@@ -306,9 +297,9 @@ The Python wrapper emitted by `codegen_kernel()` contains all three tiled ops
 `LoopSpec`. Below is the actual output captured by
 `docs/tools/capture_for_each_tile_ir.py` at `sencores=4` (the
 `debug_handle=DebugHandle(...)` field each real `OpSpec` carries is shown in
-full below, unlike the hint-driven example, since it is short enough here to
-be worth reading — it records the full fusion/provenance chain back through
-`for_each_tile`'s own `scan`/`view` tracing):
+full below, since it is short enough here to be worth reading — it records
+the full fusion/provenance chain back through `for_each_tile`'s own
+`scan`/`view` tracing):
 
 ```python
 sdsc_fused_add_copy__mul_select_view_0 = async_compile.sdsc('sdsc_fused_add_copy__mul_select_view_0',
@@ -410,41 +401,35 @@ sdsc_fused_add_copy__mul_select_view_0 = async_compile.sdsc('sdsc_fused_add_copy
 )
 ```
 
-(`debug_handle=DebugHandle(...)` is omitted above for brevity, as in the
-hint-driven example — it carries the fusion/provenance chain, not
-tiling-relevant information.)
+(`debug_handle=DebugHandle(...)` is omitted above for brevity — it carries
+the fusion/provenance chain, not tiling-relevant information.)
 
 Key observations:
 
-- **`c0`/`c1` are used throughout, at every op** — unlike the hint-driven
-  example, where the final output copy alone used `c0`/`c1` while the other
-  ops used `d0`/`d1`. Here all three ops are generated from the same single
-  `CountedLoopSchedulerNode`, so there is only one iteration-space symbol
-  pair for the whole loop body.
+- **`c0`/`c1` are used throughout, at every op.** All three ops are
+  generated from the same single `CountedLoopSchedulerNode`, so there is
+  only one iteration-space symbol pair for the whole loop body.
 - **Single-level `tiled_symbols`.** Each op mints exactly one symbol —
   `_tile_adv_while_loop_body_graph_0_0_op{8,9,15}_lvl0` — since there is only
-  one loop level (`tiled_symbols=[[lvl0]]`, not the nested `[[lvl1], [lvl0]]`
-  shape the two-level hint-driven example produces). The naming convention
-  (`_tile_adv_{op_name}_lvl{level}`) and its purpose (giving each `(op,
-  level)` pair a non-colliding symbol so multiple levels tiling the same
-  host dim don't collide when summed) are identical to the hint-driven path
-  — see [Key observations](#generated-opspec-python-wrapper-source) there
-  for the full mechanism.
+  one loop level (`tiled_symbols=[[lvl0]]`). The naming convention
+  (`_tile_adv_{op_name}_lvl{level}`) exists to give each `(op, level)` pair a
+  non-colliding symbol so multiple levels tiling the same host dim don't
+  collide when summed; a nested tiling loop (composed of two `for_each_tile`
+  calls, see `working_set_reduction.md`'s Composing and nesting section)
+  produces the `[[lvl1], [lvl0]]` shape instead.
 - **Only the four full-tensor HBM `TensorArg`s carry a
   `device_tile_advance_expr`** — `a`, `b`, `c` (each op's own HBM input) and
-  `z` (the final identity copy's HBM output) — exactly the same pattern as
-  the hint-driven example, for the same reason: `y_tile`/`z_tile`, both in
+  `z` (the final identity copy's HBM output). `y_tile`/`z_tile`, both in
   `lx`, have `loop_info.output_tiled_dims`/`tiled_dims_per_read` entries that
   omit the tiled dim entirely for those particular dependencies, so
   `_general_tile_advance` returns `None` and the printer omits the field.
-- **`add` and `mul` are *not* zero-operand here**, unlike the hint-driven
-  example. Each still reads one HBM operand directly (`a`+`b_tile`'s
-  scratchpad neighbor for `add`; `c` for `mul`) because there is no read-copy
-  op to have already absorbed that HBM read — this is the direct
-  consequence of the "no separate read-copy ops" difference called out in
-  the `graph.operations` section above. Only the identity copy at the end
-  plays the same "one full-tensor HBM operand" role that both the read
-  copies and the output copy play in the hint-driven example.
+- **`add` and `mul` are *not* zero-operand.** Each still reads one HBM
+  operand directly (`a`+`b_tile`'s scratchpad neighbor for `add`; `c` for
+  `mul`) because there is no read-copy op to have already absorbed that HBM
+  read — this is the direct consequence of the "no separate read-copy ops"
+  difference called out in the `graph.operations` section above. Only the
+  identity copy at the end carries a full-tensor HBM operand on its output
+  side.
 
 ### Generated `bundle.mlir`
 
@@ -454,9 +439,7 @@ induction variable) for each `TensorArg` whose `device_tile_advance_expr` is
 non-`None`. There is exactly one such map, `#map_0`, covering the four
 full-tensor HBM operands (`a`, `b`, `c`, `z`, bound to `%arg_0`..`%arg_3`).
 `y_tile`/`z_tile` live in `lx` and have `device_tile_advance_expr=None`, so
-neither gets an affine map, a per-core address, or any operand — same
-convention as the hint-driven example, just with a 1-D map instead of a 2-D
-one:
+neither gets an affine map, a per-core address, or any operand:
 
 ```none
 #map_0 = affine_map<(d0)[s0] -> (s0 + 16384*d0)>
@@ -521,14 +504,13 @@ module {
 ```
 
 This is the full, real captured output — nothing is elided in the loop body
-above (unlike the hint-driven example, there are only three dispatches
-total, so eliding a "repeats the same pattern" block would save little).
+above: there are only three dispatches total, so eliding a "repeats the same
+pattern" block would save little.
 
 Key points:
 
-- **One affine map, no `%pool_base_addr` argument** — same as the hint-driven
-  example, just 1-D (`affine_map<(d0)[s0] -> ...>`) instead of 2-D, since
-  there is only one loop level.
+- **One affine map, no `%pool_base_addr` argument** — 1-D
+  (`affine_map<(d0)[s0] -> ...>`), since there is only one loop level.
 - **`add` and `mul` are not zero-operand.** Each dispatch carries the
   full-tensor HBM operand(s) it reads or writes directly — `add` takes both
   `a` and `b` (8 operands: 4 cores × 2 tensors), `mul` takes `c` (4
@@ -537,12 +519,11 @@ Key points:
   `graph.operations` section above: there is no earlier dispatch that has
   already absorbed the HBM read into a fixed LX address, so `add`/`mul`
   themselves carry the per-core addressing.
-- **Every full-tensor HBM operand is still expanded into `sencores`
-  per-core addresses**, exactly as in the hint-driven example: at
-  `sencores=4`, each of `arg_0`/`arg_1`/`arg_2`/`arg_3` contributes its own
-  base address plus three `arith.addi`-computed offsets, stepping by
-  `2097152` bytes (`8388608 / 4`, the per-core share of the tensor's total
-  byte size).
+- **Every full-tensor HBM operand is expanded into `sencores` per-core
+  addresses**: at `sencores=4`, each of `arg_0`/`arg_1`/`arg_2`/`arg_3`
+  contributes its own base address plus three `arith.addi`-computed offsets,
+  stepping by `2097152` bytes (`8388608 / 4`, the per-core share of the
+  tensor's total byte size).
 - **Neither `y_tile` nor `z_tile` appears as a symbol at all** — both have
   an empty `output_tiled_dims` (see the OpSpec above), so neither needs any
   address computation, per-core or otherwise: each is a compile-time-fixed
