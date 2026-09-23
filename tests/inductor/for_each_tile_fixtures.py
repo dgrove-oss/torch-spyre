@@ -685,6 +685,12 @@ def online_softmax_fn(
     return acc / denom
 
 
+# Half of LQ (128): the outer loop must make more than one trip to actually
+# exercise nesting, so this is deliberately narrower than SOFTMAX_TILE_SIZE
+# (128, the inner loop's K/V tile size) rather than equal to it.
+NESTED_SOFTMAX_OUTER_TILE_SIZE = 64
+
+
 def nested_online_softmax_fn(
     Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
 ) -> torch.Tensor:
@@ -698,7 +704,7 @@ def nested_online_softmax_fn(
         body,
         (Q,),
         dims=(0,),
-        tile_size=64,
+        tile_size=NESTED_SOFTMAX_OUTER_TILE_SIZE,
         out_dim=0,
     )
     return out
@@ -708,10 +714,9 @@ def nested_online_softmax_reference(
     Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
 ) -> torch.Tensor:
     """Eager reference for nested_online_softmax_fn: per-row-tile online softmax."""
-    tile_size = 64
     rows = []
-    for start in range(0, Q.shape[0], tile_size):
-        q_tile = Q[start : start + tile_size]
+    for start in range(0, Q.shape[0], NESTED_SOFTMAX_OUTER_TILE_SIZE):
+        q_tile = Q[start : start + NESTED_SOFTMAX_OUTER_TILE_SIZE]
         rows.append(online_softmax_reference(q_tile, K, V))
     return torch.cat(rows, dim=0)
 
@@ -1071,6 +1076,11 @@ def paged_gather_kv_reference(
     return acc
 
 
+# Half of PAGE_LQ (32): like NESTED_SOFTMAX_OUTER_TILE_SIZE above, chosen so
+# the outer loop makes more than one trip.
+NESTED_GATHER_OUTER_TILE_SIZE = PAGE_LQ // 2
+
+
 def paged_gather_nested_fn(
     pages: torch.Tensor, table: torch.Tensor, q: torch.Tensor
 ) -> torch.Tensor:
@@ -1109,17 +1119,17 @@ def paged_gather_nested_fn(
         return None, final
 
     _, out = for_each_tile(
-        outer_body, (q,), dims=(0,), tile_size=PAGE_LQ // 2, out_dim=0
+        outer_body, (q,), dims=(0,), tile_size=NESTED_GATHER_OUTER_TILE_SIZE, out_dim=0
     )
     return out
 
 
 def paged_gather_nested_reference(pages: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     """Eager Python nesting of the same tiling, for value assertions."""
-    tile_size = PAGE_LQ // 2
     rows = []
-    for start in range(0, q.shape[0], tile_size):
-        rows.append(paged_gather_reference(pages, q[start : start + tile_size]))
+    for start in range(0, q.shape[0], NESTED_GATHER_OUTER_TILE_SIZE):
+        end = start + NESTED_GATHER_OUTER_TILE_SIZE
+        rows.append(paged_gather_reference(pages, q[start:end]))
     return torch.cat(rows, dim=0)
 
 

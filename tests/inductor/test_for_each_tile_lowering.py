@@ -16,9 +16,11 @@
 
 No Spyre device or backend compiler is required. Covers four areas, each
 in its own class group:
-  1. An eager-mode sanity check that the nested for_each_tile fixture's
-     reference implementation matches plain matmul (TestNestedForEach
-     TileFixture).
+  1. Eager-mode sanity checks for fixture reference implementations: the
+     nested for_each_tile fixture against plain matmul
+     (TestNestedForEachTileFixture), and paged_gather_reference's row-count
+     handling for Q-tiles shorter than the full sequence
+     (TestPagedGatherReference).
   2. while_loop_bridge's generic while_loop -> coarse-tile-group bridge:
      CarryBinding/carry_bindings_for and splice_while_loop's buffer
      transplant, carry/xs-leaf read redirection, and mutated-carry
@@ -43,10 +45,14 @@ import torch
 from torch._inductor.virtualized import V
 
 from for_each_tile_fixtures import (
+    PAGE_HS,
+    PAGE_LQ,
     capture_post_grad_while_loop,
     matmul_inputs,
     nested_split_m_then_k_fn,
     nested_split_m_then_k_reference,
+    paged_gather_inputs,
+    paged_gather_reference,
     split_k_fn,
     split_m_elementwise_fn,
     split_m_fn,
@@ -76,6 +82,23 @@ class TestNestedForEachTileFixture(unittest.TestCase):
         (X, Y), expected = matmul_inputs()
         actual = nested_split_m_then_k_fn(X, Y)
         torch.testing.assert_close(actual, expected, atol=self.ATOL, rtol=self.RTOL)
+
+
+class TestPagedGatherReference(unittest.TestCase):
+    """Regression test for paged_gather_reference's row-count fix.
+
+    paged_gather_reference used to hardcode PAGE_LQ as the accumulator's row
+    count instead of deriving it from q.shape[0], so it crashed (rather than
+    silently mismatching) as soon as a caller -- e.g. paged_gather_nested_
+    reference, tiling Q into narrower row-tiles -- passed a Q shorter than
+    the full sequence.
+    """
+
+    def test_accepts_q_tile_shorter_than_page_lq(self):
+        pages, _, q = paged_gather_inputs()
+        q_tile = q[: PAGE_LQ // 2]
+        out = paged_gather_reference(pages, q_tile)
+        self.assertEqual(out.shape, (PAGE_LQ // 2, PAGE_HS))
 
 
 class TestCarryBindingsFor(unittest.TestCase):
@@ -2075,6 +2098,10 @@ class TestConsumeTileDimMarkers(unittest.TestCase):
 
         def capturing_splice_while_loops(graph):
             result = original_splice_while_loops(graph)
+            # No captured["graph"] here (unlike the sibling
+            # test_nested_for_each_tile_markers_resolve_correctly): this test
+            # only checks that both WhileLoops were spliced, not marker
+            # survival, so it has no later use for the graph reference.
             captured["operations"] = list(graph.operations)
             return result
 
