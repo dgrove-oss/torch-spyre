@@ -704,6 +704,18 @@ def nested_online_softmax_fn(
     return out
 
 
+def nested_online_softmax_reference(
+    Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
+) -> torch.Tensor:
+    """Eager reference for nested_online_softmax_fn: per-row-tile online softmax."""
+    tile_size = 64
+    rows = []
+    for start in range(0, Q.shape[0], tile_size):
+        q_tile = Q[start : start + tile_size]
+        rows.append(online_softmax_reference(q_tile, K, V))
+    return torch.cat(rows, dim=0)
+
+
 def batched_online_softmax_fn(
     Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor
 ) -> torch.Tensor:
@@ -982,7 +994,7 @@ def paged_gather_fn(
 def paged_gather_reference(pages: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     """The same accumulation in fp32 on CPU, looped in Python over PAGE_ORDER."""
     pf, qf = pages.float(), q.float()
-    acc = torch.zeros(PAGE_LQ, PAGE_HS)
+    acc = torch.zeros(q.shape[0], PAGE_HS)
     for p in PAGE_ORDER:
         page = pf[p]
         acc = acc + (qf @ page.transpose(0, 1)) @ page
@@ -1057,6 +1069,58 @@ def paged_gather_kv_reference(
     for p in PAGE_ORDER:
         acc = acc + (qf @ kf[p].transpose(0, 1)) @ vf[p]
     return acc
+
+
+def paged_gather_nested_fn(
+    pages: torch.Tensor, table: torch.Tensor, q: torch.Tensor
+) -> torch.Tensor:
+    """Nested case: outer for_each_tile maps Q rows; inner gathers one page
+    per trip (Kind.GATHER nested inside another for_each_tile level).
+
+    Each outer Q-tile re-runs the full inner paged-gather loop over every
+    block in the table, mirroring how paged attention would tile queries
+    while still visiting every KV page per query tile. The inner body is
+    paged_gather_fn's own gather-mode body (tiled block table, invariant
+    page pool, one page per trip via a POINT read of the page index) --
+    see paged_gather_fn's docstring for the coarse-tiling mechanics that
+    read exercises on its own; here it additionally has to survive being
+    re-spliced once per outer trip.
+    """
+
+    def outer_body(_, outer_tiles):
+        (q_tile,) = outer_tiles
+        q_tile_rows = q_tile.shape[0]
+
+        def inner_body(acc, inner_tiles):
+            table_row, pages_all, q_whole = inner_tiles
+            page_idx = table_row[0, 0:1]
+            page = pages_all.index_select(0, page_idx).squeeze(0)
+            scores = q_whole @ page.transpose(0, 1)
+            return acc + scores @ page, None
+
+        acc0 = torch.zeros(q_tile_rows, PAGE_HS, device=q.device, dtype=q.dtype)
+        final, _ = for_each_tile(
+            inner_body,
+            (table, pages, q_tile),
+            dims=(0, None, None),
+            tile_size=1,
+            init=acc0,
+        )
+        return None, final
+
+    _, out = for_each_tile(
+        outer_body, (q,), dims=(0,), tile_size=PAGE_LQ // 2, out_dim=0
+    )
+    return out
+
+
+def paged_gather_nested_reference(pages: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """Eager Python nesting of the same tiling, for value assertions."""
+    tile_size = PAGE_LQ // 2
+    rows = []
+    for start in range(0, q.shape[0], tile_size):
+        rows.append(paged_gather_reference(pages, q[start : start + tile_size]))
+    return torch.cat(rows, dim=0)
 
 
 @contextlib.contextmanager
