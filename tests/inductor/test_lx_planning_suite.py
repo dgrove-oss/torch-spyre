@@ -61,6 +61,9 @@ class TestLxPlanningSuiteGeneration(unittest.TestCase):
 
     def test_passing_testops_tests_are_still_copied(self):
         ok_names = {n for n, v in _tests(ops.TestOps).items() if not _has_xfail(v)}
+        if not lx.tests_lx_planning_full:
+            # Only the canonical subset is copied.
+            ok_names &= lx._canonical_test_names(ops.TestOps)
         for cls in _LX_CLASSES:
             with self.subTest(cls=cls.__name__):
                 copied = {re.sub(r"_lx_planning_\w+$", "", n) for n in _tests(cls)}
