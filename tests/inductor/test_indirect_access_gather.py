@@ -841,15 +841,13 @@ class _GatherScenarios:
         M, N = 128, 256
         x = self.to_spyre(torch.rand(M, N, dtype=torch.float16))
         self.name_dims(x, {"M": M, "N": N})
-        # x.exp() is a supported direct op, so its e2e result must match the CPU
-        # reference (expect_close=True) -- unlike the indirect gathers.
+        # x.exp() is a supported direct op, not an indirect gather.
         r = self._stage_and_e2e(
             lambda x: x.exp(),
             x,
             expect=DIRECT_OP_SPEC,
             op="exp",
             detected=False,
-            expect_close=True,
         )
         self.assertFalse(any(op_spec_has_indirect_access(s) for s in r.op_specs))
         self.assertFalse(
@@ -1244,7 +1242,7 @@ class _GatherMulticoreScenarios:
         r < 2048), and the index maps output row i -> value row (i + V/2) % V:
         always a half-table hop, so under any multi-core split the fetched row
         belongs to another core's slice. The gather must match the CPU reference
-        exactly (expect_close=True) -- if the shared value tensor's per-core base
+        exactly -- if the shared value tensor's per-core base
         ever drifted with the work-division slice, a core would read a shifted
         row and diverge. Runs at 32 cores, where the indirect uint32 address cap
         holds the split to 16-way (still cross-core: a V/2 hop lands 8 cores
@@ -1262,7 +1260,6 @@ class _GatherMulticoreScenarios:
             weight,
             idx,
             expect=GATHER_OP_SPEC,
-            expect_close=True,
         )
 
 

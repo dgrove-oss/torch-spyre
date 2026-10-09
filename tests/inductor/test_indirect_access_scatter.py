@@ -825,7 +825,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_tiny_zeros(self):
@@ -847,7 +846,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_nonzero_dest(self):
@@ -871,7 +869,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_moe_inplace(self):
@@ -891,7 +888,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_moe_functional(self):
@@ -909,7 +905,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_partial_update(self):
@@ -933,7 +928,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_dense_update(self):
@@ -956,7 +950,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_large_p(self):
@@ -984,7 +977,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_ragged_n(self):
@@ -1001,7 +993,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_fp32(self):
@@ -1024,7 +1015,6 @@ class _ScatterScenarios:
             idx,
             expect=SCATTER_OP_SPEC,
             sdsc=False,
-            expect_close=True,
         )
 
     def test_index_add_dim1_unsupported(self):
@@ -1183,9 +1173,7 @@ class _ScatterScenarios:
         def kernel(inp, mask, src):
             return torch.masked_scatter(inp, mask, src)
 
-        self._stage_and_e2e(
-            kernel, inp, mask, src, expect=GATHER_OP_SPEC, expect_close=True
-        )
+        self._stage_and_e2e(kernel, inp, mask, src, expect=GATHER_OP_SPEC)
 
     def test_masked_scatter_unexpanded_row_broadcast(self):
         """torch.masked_scatter with a row mask left in its UN-EXPANDED form:
@@ -1212,9 +1200,7 @@ class _ScatterScenarios:
         def kernel(inp, mask, src):
             return torch.masked_scatter(inp, mask, src)
 
-        self._stage_and_e2e(
-            kernel, inp, mask, src, expect=GATHER_OP_SPEC, expect_close=True
-        )
+        self._stage_and_e2e(kernel, inp, mask, src, expect=GATHER_OP_SPEC)
 
     def _row_broadcast_operands(self, shape, src_rows, n_true):
         """Supported masked_scatter operands: `self` of `shape`, a mask broadcast
@@ -1276,9 +1262,7 @@ class _ScatterScenarios:
         def kernel(inp, mask, src):
             return torch.masked_scatter(inp, mask, src)
 
-        self._stage_and_e2e(
-            kernel, inp, mask, src, expect=GATHER_OP_SPEC, expect_close=True
-        )
+        self._stage_and_e2e(kernel, inp, mask, src, expect=GATHER_OP_SPEC)
 
     def test_masked_scatter_no_rows_selected(self):
         """All-False mask: nothing is selected, so the result must equal `self`
@@ -1294,9 +1278,7 @@ class _ScatterScenarios:
         def kernel(inp, mask, src):
             return torch.masked_scatter(inp, mask, src)
 
-        self._stage_and_e2e(
-            kernel, inp, mask, src, expect=GATHER_OP_SPEC, expect_close=True
-        )
+        self._stage_and_e2e(kernel, inp, mask, src, expect=GATHER_OP_SPEC)
 
     def test_masked_scatter_degenerate_last_dim_unsupported(self):
         """Degenerate last dim (cols == 1): a single-column row is not a real
