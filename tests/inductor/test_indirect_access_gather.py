@@ -29,8 +29,7 @@ work-division planner. See MULTICORE_SENCORES in indirect_access_common.
 
 There is one test per scenario -- no separate e2e variants. Each scenario
 validates the capture path and then runs the kernel on the real backend,
-validating the result and warning that the device values diverge from the CPU
-reference (the backend does not yet implement indirect gather). Scenarios route
+asserting the result matches the CPU reference. Scenarios route
 their compile through _stage_and_e2e (stage check + e2e run); capture-based
 tests call run_e2e directly after their own assertions. The three structural
 tests (sdsc_fields, sdsc_handoff, python_bundle_generation) stay capture-only.
@@ -123,9 +122,9 @@ class _GatherScenarios:
         index arg matching the IndirectAccess target, one output, a well-formed
         iteration space and TensorArg metadata, and the index is detected."""
         x, i = self._xi(P=3, two_d=True)
-        # Stage check first (and all the detailed op-spec assertions below) so
-        # they always run; the e2e at the end xfails on the expected
-        # device-side divergence/abort, which would otherwise stop the test.
+        # Stage check and the detailed op-spec assertions run before the e2e at
+        # the end, so a structural regression is reported as itself rather than
+        # as an e2e failure.
         r = self.check(
             lambda x, i: x[i].exp(),
             x,
@@ -207,8 +206,8 @@ class _GatherScenarios:
         }
         # Validate every unary's stage encoding first (all subtests run), then
         # run one representative end-to-end. They share the same gather
-        # structure, and run_e2e xfails on the expected device-side divergence,
-        # which would otherwise stop the loop before later unaries are checked.
+        # structure, and an e2e failure would stop the loop before the later
+        # unaries are checked.
         for label, fn in unaries.items():
             with self.subTest(unary=label):
                 torch._dynamo.reset()
