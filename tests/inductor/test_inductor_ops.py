@@ -7755,6 +7755,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         }
         return x, ops, shared_cases, api_only_cases
 
+    @expects_raise
     def test_core_reduction_invalid_dims_api(self):
         x, ops, shared_cases, api_only_cases = (
             self._get_core_reduction_invalid_dim_cases()
@@ -7770,6 +7771,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         f"{exc_info.type.__name__}: {exc_info.value!r}"
                     )
 
+    @expects_raise
     def test_core_reduction_invalid_dims_spyre(self):
         x, ops, shared_cases, _ = self._get_core_reduction_invalid_dim_cases()
 
@@ -7787,6 +7789,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         f"{exc_info.type.__name__}: {exc_info.value!r}"
                     )
 
+    @expects_raise
     def test_single_dim_reduction_invalid_dims_api(self):
         x, ops, shared_cases, api_only_cases = (
             self._get_single_dim_reduction_invalid_dim_cases()
@@ -7802,6 +7805,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         f"{exc_info.type.__name__}: {exc_info.value!r}"
                     )
 
+    @expects_raise
     def test_single_dim_reduction_invalid_dims_spyre(self):
         x, ops, shared_cases, _ = self._get_single_dim_reduction_invalid_dim_cases()
 
@@ -9259,6 +9263,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             expected[:, :, start:end].copy_(y)
         torch.testing.assert_close(x_spyre.cpu(), expected, atol=0.1, rtol=0.1)
 
+    @expects_raise
     def test_slice_stick_mutation_no_alt_dim_raises(self):
         """Test that offset-stick slice mutation raises Unsupported when no alt dim is divisible by stick_size."""
 
@@ -9293,6 +9298,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             rtol=0.005,
         )
 
+    @expects_raise
     def test_slice_scatter_step_raises(self):
         """A strided (non-unit-step) slice_scatter raises Unsupported."""
 
@@ -9939,6 +9945,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_unbind_cpu(self, dim: int, x):
         self.compare_with_cpu(lambda a: torch.unbind(a, dim=dim), x)
 
+    @expects_raise
     def test_restickify_fp32_unsupported(self):
         """An op that needs a restickify has no feasible layout for FP32.
 
@@ -9962,6 +9969,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 run_eager=False,
             )
 
+    @expects_raise
     def test_restickify_int64_unsupported(self):
         """The same, for INT64: there is no feasible layout without a restickify.
 
@@ -10239,6 +10247,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             self.compare_with_cpu(fn, x, y, cpu_compile=False, run_eager=False)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    @expects_raise
     def test_is_nonzero_error_cases(self):
         """Test that multi-element tensors raise RuntimeError in compiled context."""
         # Multi-element tensor - compiled path

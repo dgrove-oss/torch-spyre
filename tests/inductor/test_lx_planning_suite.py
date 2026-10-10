@@ -129,19 +129,42 @@ class TestLxPlanningSuiteGeneration(unittest.TestCase):
             sorted(n for n in vars(Dst) if n.startswith("test_")), ["test_ok_sfx"]
         )
 
+    # Hand-written tests that wrap their body in pytest.raises (or assert an error
+    # some other way) without going through the LX wrap. Not found by name, so list
+    # them: a new one has to be added here and tagged with expects_raise.
+    _HAND_WRITTEN_REJECTION_TESTS = (
+        "test_core_reduction_invalid_dims_api",
+        "test_core_reduction_invalid_dims_spyre",
+        "test_single_dim_reduction_invalid_dims_api",
+        "test_single_dim_reduction_invalid_dims_spyre",
+        "test_is_nonzero_error_cases",
+        "test_restickify_fp32_unsupported",
+        "test_restickify_int64_unsupported",
+        "test_slice_scatter_step_raises",
+        "test_slice_stick_mutation_no_alt_dim_raises",
+    )
+
     def test_hand_written_rejection_tests_have_no_lx_copies(self):
-        # The hand-written *_rejected tests assert a rejection in the op under test
-        # (e.g. an unregistered operator); the second op never gets built.
+        # The rejection is raised in the op under test (an unregistered operator, an
+        # unsupported layout, an API check) before the second op is built, or the test
+        # never calls the overridden compare_with_cpu at all, so a copy would only
+        # repeat the base test.
         rejected = {
             n
             for n, v in _tests(ops.TestOps).items()
-            if n.endswith("_rejected") and not _has_xfail(v)
+            if (n.endswith("_rejected") and not _has_xfail(v))
+            or n in self._HAND_WRITTEN_REJECTION_TESTS
         }
-        self.assertTrue(rejected, "TestOps has no *_rejected tests to check")
+        self.assertTrue(rejected, "TestOps has no rejection tests to check")
+        self.assertLessEqual(set(self._HAND_WRITTEN_REJECTION_TESTS), set(rejected))
         untagged = sorted(
             n for n in rejected if not _expects_raise(ops.TestOps.__dict__[n])
         )
         self.assertEqual(untagged, [])
+        for cls in _LX_CLASSES:
+            with self.subTest(cls=cls.__name__):
+                copied = {re.sub(r"_lx_planning_\w+$", "", n) for n in _tests(cls)}
+                self.assertEqual(sorted(rejected & copied), [])
 
     def test_canonical_subset_skips_expect_raise_cases(self):
         class Fake:
