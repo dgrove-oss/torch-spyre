@@ -3881,7 +3881,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.zeros((256,), dtype=torch.float16),
                 ),
             },
-            "expect_fail": ["eval_mode"],
+            # TODO: a missing feature, not a design limit. When aten::native_batch_norm
+            # is registered this stops raising, and the case has to become a positive one.
+            "expect_raise": {"eval_mode": "Could not run 'aten::native_batch_norm'"},
         },
         # TODO: TorchInductor compilation failure in the Spyre lowering pass —
         # KeyError 'No FX node for buf11' in split_multi_ops.py (issue #3287)
@@ -8075,55 +8077,43 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             lambda x: torch.var_mean(x, dim=0, keepdim=False), x, run_eager=False
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.cumprod yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::cumprod.out' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_cumprod_dim0_known_xfail(self):
+    def test_cumprod_dim0_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.cumprod is
+        # implemented this stops raising, and the test has to become a positive one.
         x = cached_randn((67, 256), scale=0.1)
-        self.compare_with_cpu(lambda x: torch.cumprod(x, dim=0), x, run_eager=False)
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::cumprod\.out'"
+        ):
+            self.compare_with_cpu(lambda x: torch.cumprod(x, dim=0), x, run_eager=False)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.logcumsumexp yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::_logcumsumexp' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_logcumsumexp_dim0_known_xfail(self):
+    def test_logcumsumexp_dim0_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.logcumsumexp is
+        # implemented this stops raising, and the test has to become a positive one.
         x = cached_randn((67, 256), scale=0.1)
-        self.compare_with_cpu(
-            lambda x: torch.logcumsumexp(x, dim=0), x, run_eager=False
-        )
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::_logcumsumexp'"
+        ):
+            self.compare_with_cpu(
+                lambda x: torch.logcumsumexp(x, dim=0), x, run_eager=False
+            )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.cummax yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::_cummax_helper' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_cummax_dim0_known_xfail(self):
+    def test_cummax_dim0_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.cummax is
+        # implemented this stops raising, and the test has to become a positive one.
         x = unique_randn_along_dim((67, 256), dim=0)
-        self.compare_with_cpu(lambda x: torch.cummax(x, dim=0), x, run_eager=False)
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::_cummax_helper'"
+        ):
+            self.compare_with_cpu(lambda x: torch.cummax(x, dim=0), x, run_eager=False)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.cummin yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::_cummin_helper' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_cummin_dim0_known_xfail(self):
+    def test_cummin_dim0_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.cummin is
+        # implemented this stops raising, and the test has to become a positive one.
         x = unique_randn_along_dim((67, 256), dim=0)
-        self.compare_with_cpu(lambda x: torch.cummin(x, dim=0), x, run_eager=False)
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::_cummin_helper'"
+        ):
+            self.compare_with_cpu(lambda x: torch.cummin(x, dim=0), x, run_eager=False)
 
     @pytest.mark.xfail(
         reason=(
@@ -8165,29 +8155,20 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.median yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::median.dim_values' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_median_dim1_known_xfail(self):
+    def test_median_dim1_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.median is
+        # implemented this stops raising, and the test has to become a positive one.
         x = unique_randn_along_dim((67, 71, 256), dim=1)
-        self.compare_with_cpu(
-            lambda x: torch.median(x, dim=1, keepdim=False), x, run_eager=False
-        )
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::median\.dim_values'"
+        ):
+            self.compare_with_cpu(
+                lambda x: torch.median(x, dim=1, keepdim=False), x, run_eager=False
+            )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.nanmedian yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::median.dim_values' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_nanmedian_dim0_known_xfail(self):
+    def test_nanmedian_dim0_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.nanmedian is
+        # implemented this stops raising, and the test has to become a positive one.
         x = torch.tensor(
             [
                 [float("nan"), 1.0, -2.0, 3.0],
@@ -8196,21 +8177,18 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             ],
             dtype=torch.float32,
         )
-        self.compare_with_cpu(
-            lambda x: torch.nanmedian(x, dim=0, keepdim=False),
-            x,
-            run_eager=False,
-        )
+        with pytest.raises(
+            NotImplementedError, match=r"Could not run 'aten::nanmedian\.dim_values'"
+        ):
+            self.compare_with_cpu(
+                lambda x: torch.nanmedian(x, dim=0, keepdim=False),
+                x,
+                run_eager=False,
+            )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Spyre compiled backend does not support torch.mode yet "
-            "(stable error signature: NotImplementedError: Could not run "
-            "'aten::mode' with arguments from the 'spyre' backend)"
-        ),
-        strict=True,
-    )
-    def test_mode_dim1_known_xfail(self):
+    def test_mode_dim1_rejected(self):
+        # TODO: a missing feature, not a design limit. When torch.mode is
+        # implemented this stops raising, and the test has to become a positive one.
         x = torch.tensor(
             [
                 [0.0, 0.0, 2.0, 3.0],
@@ -8219,9 +8197,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             ],
             dtype=torch.float16,
         )
-        self.compare_with_cpu(
-            lambda x: torch.mode(x, dim=1, keepdim=False), x, run_eager=False
-        )
+        with pytest.raises(NotImplementedError, match=r"Could not run 'aten::mode'"):
+            self.compare_with_cpu(
+                lambda x: torch.mode(x, dim=1, keepdim=False), x, run_eager=False
+            )
 
     def test_max_sub_broadcast(self, dim: int, x):
         def fn(x):
