@@ -32,6 +32,7 @@ sys.path.append(_test_dir)
 
 import inductor.test_inductor_ops as ops  # noqa: E402
 import inductor.test_inductor_ops_lx_planning as lx  # noqa: E402
+from inductor.utils_inductor import expects_raise  # noqa: E402
 
 _LX_CLASSES = (lx.LxPlanningTwoOpPointwiseAdditionTest, lx.LxPlanningTwoOpReductionTest)
 
@@ -107,6 +108,40 @@ class TestLxPlanningSuiteGeneration(unittest.TestCase):
         self.assertEqual(
             sorted(n for n in vars(Dst) if n.startswith("test_")), ["test_ok_sfx"]
         )
+
+    def test_hand_written_expects_raise_tests_are_not_copied(self):
+        # A hand-written test that wraps its body in pytest.raises is tagged with
+        # the decorator and skipped the same way as a generated expect_raise case.
+        class Src:
+            def test_ok(self):
+                pass
+
+            @expects_raise
+            def test_rejected(self):
+                pass
+
+        class Dst:
+            pass
+
+        with mock.patch.object(lx, "tests_lx_planning_full", True):
+            lx._copy_canonical_tests(Src, Dst, "sfx", None, [])
+        self.assertEqual(
+            sorted(n for n in vars(Dst) if n.startswith("test_")), ["test_ok_sfx"]
+        )
+
+    def test_hand_written_rejection_tests_have_no_lx_copies(self):
+        # The hand-written *_rejected tests assert a rejection in the op under test
+        # (e.g. an unregistered operator); the second op never gets built.
+        rejected = {
+            n
+            for n, v in _tests(ops.TestOps).items()
+            if n.endswith("_rejected") and not _has_xfail(v)
+        }
+        self.assertTrue(rejected, "TestOps has no *_rejected tests to check")
+        untagged = sorted(
+            n for n in rejected if not _expects_raise(ops.TestOps.__dict__[n])
+        )
+        self.assertEqual(untagged, [])
 
     def test_canonical_subset_skips_expect_raise_cases(self):
         class Fake:

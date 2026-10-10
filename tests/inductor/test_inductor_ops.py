@@ -32,6 +32,7 @@ from utils_inductor import (
     cached_randn,
     cached_xavier,
     compare_with_cpu,
+    expects_raise,
     make_param_dict,
     unique_randn_along_dim,
     shapes2key,
@@ -7373,6 +7374,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     "storage (see #3770)"
                 )
 
+    @expects_raise
     def test_storage_offset_placeholder_fixed_layout_rejected(self):
         # Fixed-layout ops need their inputs' sticks where the op dictates, so
         # an offset stick would need a restickify before the op and another to
@@ -7825,6 +7827,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             lambda x: torch.topk(x, k, dim=dim)[0], x, run_eager=False
         )
 
+    @expects_raise
     def test_topk_largest_false_rejected(self):
         # largest=False cannot be served by the topkvalue/topkindex reduction
         # (it always returns the largest elements), so compile must raise.
@@ -7836,6 +7839,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "spyre",
             )
 
+    @expects_raise
     def test_topk_unsplittable_k_rejected(self):
         # k=35's divisors are 1, 5, 7, 35: none give k // d <= 4 with
         # d <= SENCORES (32), so no valid multi-core split exists.
@@ -7948,6 +7952,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    @expects_raise
     def test_count_nonzero_float_dim0_rejected(self):
         # The compiled backend has no int32 sum, which count_nonzero needs.
         # TODO: a missing feature, not a design limit. When int32 sum is
@@ -7960,6 +7965,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 run_eager=False,
             )
 
+    @expects_raise
     def test_count_nonzero_bool_dim0_rejected(self):
         # The compiled backend has no int32 sum, which count_nonzero needs.
         # TODO: a missing feature (see test_count_nonzero_float_dim0_rejected).
@@ -7988,6 +7994,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    @expects_raise
     def test_nanmean_all_dims_rejected(self):
         # nanmean sums the non-NaN values, and the backend has no int32 sum.
         # TODO: a missing feature (see test_count_nonzero_float_dim0_rejected).
@@ -8077,6 +8084,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             lambda x: torch.var_mean(x, dim=0, keepdim=False), x, run_eager=False
         )
 
+    @expects_raise
     def test_cumprod_dim0_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.cumprod is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8086,6 +8094,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ):
             self.compare_with_cpu(lambda x: torch.cumprod(x, dim=0), x, run_eager=False)
 
+    @expects_raise
     def test_logcumsumexp_dim0_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.logcumsumexp is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8097,6 +8106,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 lambda x: torch.logcumsumexp(x, dim=0), x, run_eager=False
             )
 
+    @expects_raise
     def test_cummax_dim0_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.cummax is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8106,6 +8116,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         ):
             self.compare_with_cpu(lambda x: torch.cummax(x, dim=0), x, run_eager=False)
 
+    @expects_raise
     def test_cummin_dim0_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.cummin is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8155,6 +8166,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    @expects_raise
     def test_median_dim1_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.median is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8166,6 +8178,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 lambda x: torch.median(x, dim=1, keepdim=False), x, run_eager=False
             )
 
+    @expects_raise
     def test_nanmedian_dim0_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.nanmedian is
         # implemented this stops raising, and the test has to become a positive one.
@@ -8186,6 +8199,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 run_eager=False,
             )
 
+    @expects_raise
     def test_mode_dim1_rejected(self):
         # TODO: a missing feature, not a design limit. When torch.mode is
         # implemented this stops raising, and the test has to become a positive one.
