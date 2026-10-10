@@ -506,18 +506,21 @@ class TestNegativeScalarOperations:
         with pytest.raises(RuntimeError):
             _run_spyre(execution_mode, tensor_mul, x)
 
-    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/1219
-    @pytest.mark.xfail(
-        reason="backend does not support aten::index operation required for NaN/Inf validation"
-    )
-    def test_division_by_zero_result(self, execution_mode):
+    def test_division_by_zero_result(self, request, execution_mode):
         """Division by zero: Inf / NaN behavior."""
+        strict_xfail(
+            request,
+            AssertionError,
+            "x / 0.0 returns NaN instead of +-inf for inputs of magnitude 2 or "
+            "more (#5365)",
+        )
 
         def div_zero(x):
             return x / 0.0
 
         x = cached_randn((10, 10))
-        result = _run_spyre(execution_mode, div_zero, x)
+        # Checked on the host: the device has no aten::index kernel (#1219).
+        result = _run_spyre(execution_mode, div_zero, x).cpu()
         non_zero_mask = x.abs() > 1e-6
         if non_zero_mask.any():
             assert torch.isinf(result[non_zero_mask]).all()
@@ -555,8 +558,8 @@ class TestNegativeScalarOperations:
             strict_xfail(
                 request,
                 AssertionError,
-                "multiplying by an infinite scalar returns NaN for some elements "
-                "instead of -inf",
+                "multiplying by an infinite scalar returns NaN instead of -inf for "
+                "inputs of magnitude 2 or more (#5365)",
             )
 
         def special_mul(x):
@@ -624,7 +627,8 @@ class TestNegativeScalarOperations:
             strict_xfail(
                 request,
                 AssertionError,
-                "x * 1e10 in FP16 returns [inf, nan, nan], not all inf",
+                "x * 1e10 in FP16 returns NaN instead of inf for inputs of magnitude "
+                "2 or more (#5365)",
             )
         elif expected_behavior == "overflow_or_large" and execution_mode == "compiled":
             strict_xfail(
@@ -653,12 +657,14 @@ class TestNegativeScalarOperations:
         elif expected_behavior == "overflow_or_large":
             assert torch.isinf(result).any() or result.abs().max() > 60000
 
-    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/1639
-    @pytest.mark.xfail(
-        reason="backend does not support dtype conversion in add operations"
-    )
-    def test_int_tensor_float_scalar_promotion(self, execution_mode):
+    def test_int_tensor_float_scalar_promotion(self, request, execution_mode):
         """Int tensor + float scalar promotes to float."""
+        strict_xfail(
+            request,
+            AssertionError,
+            "an int64 tensor plus a float scalar returns int64 with the scalar "
+            "dropped (#5363)",
+        )
 
         def int_float_add(x):
             return x + 0.5

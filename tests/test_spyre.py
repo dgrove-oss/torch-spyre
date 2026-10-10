@@ -45,9 +45,13 @@ _SCALAR_ROUNDTRIP_DTYPE_CASES = [
     (torch.float32, lambda fn: fn((), dtype=torch.float32)),
 ]
 
-# TODO: ISSUE: https://github.com/torch-spyre/torch-spyre/issues/1153 (to_dtype / Inductor)
+# The add is correct, but int8 and bool go through a CPU fallback for the conversion to
+# float32, which warns, and the helper asserts no warning (#5364).
 _SCALAR_ADD_XFAIL_TO_DTYPE = pytest.mark.xfail(
-    reason="Support scalar eager add with to_dtype lowering in Spyre"
+    strict=True,
+    raises=AssertionError,
+    reason="the int8/bool to float32 conversion falls back to the CPU and warns, "
+    "and the test asserts no warning (#5364)",
 )
 
 
@@ -299,7 +303,7 @@ class TestSpyre(TestCase):
             )
             self._assert_zero_dim_roundtrip(x, x_cpu, dtype)
 
-    # Scalar 0-dim: spyre -> add(2.) -> cpu. int8/bool/int64: Inductor to_dtype in add (#1153).
+    # Scalar 0-dim: spyre -> add(2.) -> cpu. int8/bool: the conversion to float32 warns (#5364).
     # float8: SEN143_FP8 unsupported. float16/float32: pass; ignore known full() CPU fallback warn.
     @parametrize(
         "dtype, scalar_factory, ignored_warning_message",
