@@ -742,8 +742,14 @@ class TestNegativeScalarOperations:
         assert result.shape == x.shape
         assert result.requires_grad
 
-    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/1558
-    @pytest.mark.xfail(reason="RuntimeError: Error: In-device copy not implemented.")
+    # Non-strict: the outcome depends on the deeptools build. It passes on deeptools
+    # main and fails on the older build CI uses, with "In-device copy not
+    # implemented" (#1558). Make it a plain test once CI is on main.
+    @pytest.mark.xfail(
+        strict=False,
+        reason="RuntimeError: In-device copy not implemented (#1558); passes on "
+        "deeptools main, fails on the older build",
+    )
     def test_inplace_scalar_operation(self, execution_mode):
         """In-place multiply by scalar."""
 
@@ -770,10 +776,6 @@ class TestNegativeScalarOperations:
         x = cached_randn((10, 10))
         _compare_modes(execution_mode, circular_dep, x, atol=0.0005, rtol=0.001)
 
-    # TODO: ISSUE https://github.com/torch-spyre/torch-spyre/issues/1738
-    @pytest.mark.xfail(
-        reason="backend does not support aten::isnan operations required for NaN validation"
-    )
     def test_many_scalar_constants(self, execution_mode):
         """Many scalar adds/muls in a loop."""
 
@@ -786,7 +788,8 @@ class TestNegativeScalarOperations:
         x = cached_randn((10, 10))
         result = _run_spyre(execution_mode, many_scalars, x)
         assert result.shape == x.shape
-        assert not torch.isnan(result).any()
+        # Checked on the host: the device has no aten::isnan kernel (#1738).
+        assert not torch.isnan(result.cpu()).any()
 
     def test_nested_compile_scalar(self, execution_mode):
         """Nested torch.compile scalar path."""
