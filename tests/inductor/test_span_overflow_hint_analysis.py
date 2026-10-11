@@ -6439,7 +6439,19 @@ class TestSpanOverflowPointwiseCodegen(InductorTestCase):
         manual_block = _loop_spec_block(manual_sources[0])
 
         # Same tile count -> same lowering structure: the auto pass reuses the
-        # manual coarse-tile machinery, not a divergent path.
+        # manual coarse-tile machinery, not a divergent path.  The blocks are
+        # NOT byte-identical, and the differences are real, not spelling:
+        #   * advance symbols are named differently;
+        #   * the tiled axis sits at a different position in a TensorArg's
+        #     device_size ([1, 5, 16, 64] from span-overflow, which runs after
+        #     stickification, vs [1, 16, 5, 64] from for_each_tile, which runs
+        #     before);
+        #   * for_each_tile's map mode stacks per-trip results into an extra
+        #     [trips, 5, 16, 64] buffer that the span-overflow path does not
+        #     have.
+        # So compare only what must agree: the op sequence and the trip
+        # counts.  Numerics of both paths are checked separately (see
+        # test_bmm_to_pointwise_join_numeric_via_manual_hint).
         def ops(block):
             return re.findall(r"op='(\w+)'", block)
 

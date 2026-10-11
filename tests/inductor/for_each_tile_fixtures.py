@@ -1513,3 +1513,23 @@ def carried_reduction_fn(
     )
     final, _ = for_each_tile(body, (values,), dims=(0,), tile_size=1, init=init)
     return final
+
+
+def nested_restickify_add_fn(A: torch.Tensor, X: torch.Tensor) -> torch.Tensor:
+    """a.t() + x tiled at two levels: the outer loop tiles the result's rows
+    (a's dim 1), the inner loop its columns (a's dim 0); a restickify per tile."""
+
+    def outer_body(_, outer_ops):
+        a_cols, x_rows = outer_ops
+
+        def inner_body(_, inner_ops):
+            a_blk, x_blk = inner_ops
+            return None, a_blk.t() + x_blk
+
+        _, row_out = for_each_tile(
+            inner_body, (a_cols, x_rows), dims=(0, 1), tile_size=128, out_dim=1
+        )
+        return None, row_out
+
+    _, out = for_each_tile(outer_body, (A, X), dims=(1, 0), tile_size=64, out_dim=0)
+    return out

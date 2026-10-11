@@ -26,6 +26,7 @@ import os
 import sys
 
 import pytest
+import regex as re
 import torch
 import torch.nn.functional as F
 from unittest.mock import patch as mock_patch
@@ -487,8 +488,11 @@ class TestAutoSpanOverflowBmmE2E(InductorTestCase):
             "torch_spyre._inductor.wsr.span_overflow_hint_analysis.MAX_SPAN_BYTES",
             16 * 1024,
         ):
+            # Outputs have std ~2e-3 (0.01-scaled inputs, K=512); the tolerance
+            # must sit well below that, or a dropped K partial (~1.6e-3) and
+            # even an all-zero result would pass.
             compare_with_cpu(
-                fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
+                fn, a, b, run_compile=True, run_eager=False, atol=5e-4, rtol=0.05
             )
 
     def _auto_span_overflow_bmm_source(self, *, enable_reduction_tiling):
@@ -530,6 +534,16 @@ class TestAutoSpanOverflowBmmE2E(InductorTestCase):
         self.assertIn("count=sympify('8')", src)
         self.assertIn("count=sympify('2')", src)
         self.assertIn("coarse_tile_reduce_copy", src)
+
+        # The combine op's accumulator read/write must stay at one fixed
+        # address across the inner K loop: no device_tile_advance_expr.
+        combine = re.search(
+            r"ir_chain=\('bmm', 'coarse_tile_combine_\w+'\).*?args=\[(.*?)\n\s*\]\n",
+            src,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(combine, "expected the combine op's OpSpec in source")
+        self.assertNotIn("device_tile_advance_expr", combine.group(1))
 
     def test_auto_span_overflow_bmm_kill_switch_rejects_unresolved_k_span(self):
         """Disabling K tiling must not hide a K span left by output-only tiling."""

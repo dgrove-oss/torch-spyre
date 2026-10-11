@@ -92,6 +92,7 @@ from for_each_tile_fixtures import (
     batched_online_softmax_fn,
     carried_reduction_fn,
     moe_tile_experts_fn,
+    nested_restickify_add_fn,
     outside_consumer_fn,
     restickify_add_fn,
     restickify_matmul_xt_y_fn,
@@ -1196,7 +1197,10 @@ class TestForEachTileGraphShapesE2E(_DynamoResetTestCase):
         src = "\n".join(code)
         counts = [int(c) for c in re.findall(r"count=sympify\('(\d+)'\)", src)]
         self.assertIn("LoopSpec(", src)
-        self.assertEqual(counts, [trips], f"unexpected loop trip counts in:\n{src}")
+        expected = trips if isinstance(trips, list) else [trips]
+        self.assertEqual(
+            sorted(counts), sorted(expected), f"unexpected loop trip counts in:\n{src}"
+        )
         torch.testing.assert_close(
             out.cpu().float(),
             ref.float(),
@@ -1227,6 +1231,11 @@ class TestForEachTileGraphShapesE2E(_DynamoResetTestCase):
         x, y = shaped_randn(256, 128), shaped_randn(256, 128, seed=1)
         ref = x.float().t() @ y.float()
         self._check(restickify_matmul_xt_y_fn, (x, y), ref, trips=2, atol=0.5)
+
+    def test_restickify_add_nested_tiles(self):
+        a, x = shaped_randn(256, 128), shaped_randn(128, 256, seed=1)
+        ref = a.float().t() + x.float()
+        self._check(nested_restickify_add_fn, (a, x), ref, trips=[2, 2])
 
     def test_outside_consumer_after_loop(self):
         a, b, c = (shaped_randn(256, 128, seed=s) for s in range(3))
@@ -1262,11 +1271,22 @@ class TestForEachTileGraphShapesE2E(_DynamoResetTestCase):
         )
 
     def test_moe_matmul_tiled_over_128_experts(self):
+        """128 trips: the last experts' slabs sit far from the first's.
+
+        Scaled identities make every expert's output distinct and exact in
+        fp16 (scales 1..128), so an all-zero result, a stale slab, or every
+        trip reading expert 0 cannot pass.
+        """
         experts, tokens, hidden, ffn = 128, 64, 64, 64
-        x = shaped_randn(1, tokens, hidden) * 0.01
-        w = shaped_randn(experts, hidden, ffn, seed=1) * 0.01
+        x = torch.eye(tokens, hidden, dtype=torch.float16).unsqueeze(0)
+        w = torch.stack(
+            [
+                torch.eye(hidden, ffn, dtype=torch.float16) * scale
+                for scale in range(1, experts + 1)
+            ]
+        )
         ref = x.float() @ w.float()
-        self._check(moe_tile_experts_fn, (x, w), ref, trips=experts, atol=0.05)
+        self._check(moe_tile_experts_fn, (x, w), ref, trips=experts, atol=0, rtol=0)
 
     def test_moe_matmul_distinguishes_experts_exactly(self):
         """Each trip reads its own weight slab, not expert zero or stale HBM."""
