@@ -1333,7 +1333,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
             "expect_fail": {
                 "fp32_enabled": "autocast casts the fp32 inputs to fp16 on the device, "
-                "and a matmul of those cast operands returns wrong values"
+                "and a matmul of those cast operands returns wrong values, #5368"
             },
         },
         ("test_einsum", "test_mm_relaxed"): {
