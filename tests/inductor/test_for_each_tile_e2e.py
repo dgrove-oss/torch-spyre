@@ -1261,6 +1261,86 @@ class TestForEachTileGraphShapesE2E(_DynamoResetTestCase):
             moe_tile_experts_fn, (x, w), x.float() @ w.float(), trips=4, atol=0.5
         )
 
+    def test_moe_matmul_tiled_over_128_experts(self):
+        experts, tokens, hidden, ffn = 128, 64, 64, 64
+        x = shaped_randn(1, tokens, hidden) * 0.01
+        w = shaped_randn(experts, hidden, ffn, seed=1) * 0.01
+        ref = x.float() @ w.float()
+        self._check(moe_tile_experts_fn, (x, w), ref, trips=experts, atol=0.05)
+
+    def test_moe_matmul_distinguishes_experts_exactly(self):
+        """Each trip reads its own weight slab, not expert zero or stale HBM."""
+        experts, tokens, hidden, ffn = 3, 64, 64, 64
+        x = torch.eye(tokens, hidden, dtype=torch.float16).unsqueeze(0)
+        w = torch.stack(
+            [
+                torch.eye(hidden, ffn, dtype=torch.float16) * scale
+                for scale in range(1, experts + 1)
+            ]
+        )
+        ref = x.float() @ w.float()
+        self._check(moe_tile_experts_fn, (x, w), ref, trips=experts, atol=0, rtol=0)
+
+    def test_moe_matmul_reads_expert_weights_directly(self):
+        """The activation stays fixed while weights advance without staging."""
+        import ast
+
+        import regex as re
+        from torch._inductor.utils import run_and_get_code
+
+        experts, tokens, hidden, ffn = 3, 64, 64, 64
+        x = shaped_randn(1, tokens, hidden).to(DEVICE_NAME)
+        w = shaped_randn(experts, hidden, ffn, seed=1).to(DEVICE_NAME)
+
+        compiled = torch.compile(
+            moe_tile_experts_fn, backend="inductor", fullgraph=True
+        )
+        _, code = run_and_get_code(compiled, x, w)
+        src = "\n".join(code)
+
+        tensor_args = []
+        for node in ast.walk(ast.parse(src)):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "TensorArg"
+            ):
+                continue
+            keywords = {kw.arg: kw.value for kw in node.keywords}
+            size_node = keywords.get("device_size")
+            if not isinstance(size_node, ast.List):
+                continue
+            size = [ast.literal_eval(elt) for elt in size_node.elts]
+            advance_node = keywords.get("device_tile_advance_expr")
+            advance = (
+                ast.literal_eval(advance_node.args[0])
+                if isinstance(advance_node, ast.Call) and advance_node.args
+                else None
+            )
+            tensor_args.append((ast.literal_eval(keywords["is_input"]), size, advance))
+
+        # Only the expert weights advance; every other input read is fixed.
+        weight_size = [1, hidden, experts, ffn]
+        weight_reads = [
+            advance
+            for is_input, size, advance in tensor_args
+            if is_input and size == weight_size
+        ]
+        self.assertEqual(len(weight_reads), 1)
+        self.assertIsInstance(weight_reads[0], str)
+        other_advances = [
+            advance
+            for is_input, size, advance in tensor_args
+            if is_input and size != weight_size
+        ]
+        self.assertEqual(other_advances, [None] * len(other_advances))
+        weight_step = re.fullmatch(r"floor\((\d+)\*[^)]+\)", weight_reads[0])
+        self.assertIsNotNone(weight_step)
+        # TensorArg addresses are in df16 sticks.  64 sticks * 64 elements
+        # per stick is one H*F = 4096-element expert slab.
+        self.assertEqual(int(weight_step.group(1)) * 64, hidden * ffn)
+        self.assertNotIn("read_copy", src)
+
     def test_carried_sum_over_tiled_dim(self):
         v = shaped_randn(4, 64, 64)
         fn = lambda v: carried_reduction_fn(v, lambda acc, s: acc + s.sum(0), 0.0)  # noqa: E731
