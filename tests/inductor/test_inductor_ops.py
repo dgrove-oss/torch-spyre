@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 
 
+from torch._inductor.exc import InductorError
 from torch_spyre.ops.fallbacks import FallbackWarning
 from utils_inductor import (
     ParameterizedTestMeta,
@@ -8016,9 +8017,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend hits an internal lowering bug for "
-            "torch.nansum (stable error signature: InductorError: IndexError: "
-            "list index out of range)"
+            "torch.nansum (stable error signature: InductorError: RuntimeError: "
+            "Failed to import the generated kernel, a SyntaxError)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_nansum_all_dims_known_xfail(self):
@@ -8035,9 +8037,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.std yet (stable "
-            "error signature: InductorError: TypeError: "
-            "'UnimplementedOp' object is not subscriptable)"
+            "error signature: InductorError: KeyError: 'No FX node for buf...', "
+            "the failure of #3287)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_std_dim0_known_xfail(self):
@@ -8049,9 +8052,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.var yet (stable "
-            "error signature: InductorError: TypeError: "
-            "'UnimplementedOp' object is not subscriptable)"
+            "error signature: InductorError: KeyError: 'No FX node for buf...', "
+            "the failure of #3287)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_var_dim0_known_xfail(self):
@@ -8063,9 +8067,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.std_mean yet "
-            "(stable error signature: InductorError: TypeError: "
-            "'UnimplementedOp' object is not subscriptable)"
+            "(stable error signature: InductorError: KeyError: "
+            "'No FX node for buf...', the failure of #3287)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_std_mean_dim0_known_xfail(self):
@@ -8077,9 +8082,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.var_mean yet "
-            "(stable error signature: InductorError: TypeError: "
-            "'UnimplementedOp' object is not subscriptable)"
+            "(stable error signature: InductorError: NotImplementedError: "
+            "Pointwise)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_var_mean_dim0_known_xfail(self):
@@ -8133,9 +8139,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.quantile yet "
-            "(stable error signature: InductorError: Unsupported: unexpected "
-            "argument PointwiseOp(op='to_dtype', ...) to mul)"
+            "(stable error signature: InductorError: KeyError: "
+            "'No FX node for buf...', the failure of #3287)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_quantile_q050_dim0_known_xfail(self):
@@ -8149,9 +8156,10 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     @pytest.mark.xfail(
         reason=(
             "Spyre compiled backend does not support torch.nanquantile yet "
-            "(stable error signature: InductorError: IndexError: list index "
-            "out of range)"
+            "(stable error signature: InductorError: KeyError: "
+            "'No FX node for buf...', the failure of #3287)"
         ),
+        raises=InductorError,
         strict=True,
     )
     def test_nanquantile_q050_dim0_known_xfail(self):

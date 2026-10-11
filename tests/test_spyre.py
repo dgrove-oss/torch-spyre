@@ -91,7 +91,6 @@ class TestSpyre(TestCase):
     def test_initializes(self):
         self.assertEqual(torch._C._get_privateuse1_backend_name(), "spyre")
 
-    @pytest.mark.xfail(reason="autograd not yet supported", strict=True)
     def test_autograd_init(self):
         # Make sure autograd is initialized
         torch.ones(2, requires_grad=True, device="spyre").sum().backward()
@@ -107,7 +106,7 @@ class TestSpyre(TestCase):
                 thread_name = file.read().strip()
             all_thread_names.add(thread_name)
 
-        for i in range(torch.spyre._device_daemon.NUM_DEVICES):
+        for i in range(torch.spyre.device_count()):
             self.assertIn(f"pt_autograd_{i}", all_thread_names)
 
     def test_empty_factory(self):
@@ -429,7 +428,11 @@ class TestSpyre(TestCase):
         ):
             spyre_t + cpu_t
 
-    @pytest.mark.xfail(reason="data-dependent output not supported", strict=True)
+    @pytest.mark.xfail(
+        raises=NotImplementedError,
+        reason="data-dependent output not supported (no aten::masked_select)",
+        strict=True,
+    )
     def test_data_dependent_output(self):
         cpu_a = torch.randn(10)
         a = cpu_a.to(device="spyre")
