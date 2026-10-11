@@ -6345,17 +6345,20 @@ class TestSpanOverflowPointwiseCodegen(InductorTestCase):
     )
     def test_auto_span_overflow_matches_equivalent_spyre_hint_loop_spec(self):
         """Automatic span-overflow tiling must lower through the *same* coarse-
-        tile -> LoopSpec path as an explicit ``spyre_hint``.
+        tile -> LoopSpec path as an explicit ``for_each_tile`` loop.
 
         The test does NOT assert which split the planner picks -- that is the
         planner's own decision and any legal divisor is fine.  It reads the
         tile count the auto pass actually chose out of its ``LoopSpec``, feeds
-        that same count into a manual ``spyre_hint(num_tiles_per_dim=...)``,
-        and asserts the two compiles emit an identical ``LoopSpec`` block.  A
+        that same count into a manual ``for_each_tile`` over the same dim, and
+        asserts the two compiles emit the same ``LoopSpec`` structure: the same
+        op sequence and the same trip counts.  The generated advance-symbol
+        names differ (the loop built by ``for_each_tile`` derives them from its
+        while-loop body graph), so the blocks are not compared textually.  A
         prior version pinned the count to a hard-coded ``5`` and broke when the
         planner (validly) chose ``4`` instead -- ``TODO(3293-decision-xfail)``.
         """
-        from torch_spyre._inductor import spyre_hint
+        from torch_spyre._inductor.wsr.for_each_tile import for_each_tile
 
         shape = (1, 20, 16, 64)
         x = torch.randn(shape, dtype=torch.float16).to("spyre")
@@ -6408,7 +6411,7 @@ class TestSpanOverflowPointwiseCodegen(InductorTestCase):
         auto_block = _loop_spec_block(auto_sources[0])
 
         # The tile count the planner chose for itself -- not asserted, echoed
-        # into the manual hint below.
+        # into the manual loop below.
         m = re.search(r"count=sympify\('(\d+)'\)", auto_block)
         self.assertIsNotNone(m, auto_block)
         auto_count = int(m.group(1))
@@ -6416,8 +6419,13 @@ class TestSpanOverflowPointwiseCodegen(InductorTestCase):
         self.assertEqual(shape[1] % auto_count, 0)
 
         def manual_hint_fn(x, y):
-            with spyre_hint(num_tiles_per_dim={"SO_H": auto_count}):
-                return x + y
+            def body(_, ops):
+                x_tile, y_tile = ops
+                return None, x_tile + y_tile
+
+            return for_each_tile(
+                body, (x, y), dims=(1, 1), tile_size=shape[1] // auto_count, out_dim=1
+            )[1]
 
         with (
             patch(_LAUNCH_JOBPLAN),
@@ -6425,15 +6433,22 @@ class TestSpanOverflowPointwiseCodegen(InductorTestCase):
             mock_backend_compiler(),
         ):
             _, manual_sources = run_and_get_code(
-                torch.compile(manual_hint_fn, dynamic=False), x, y
+                torch.compile(manual_hint_fn, dynamic=False, fullgraph=True), x, y
             )
 
         manual_block = _loop_spec_block(manual_sources[0])
 
-        # Same tile count -> identical lowering: the auto pass reuses the
-        # manual-hint coarse-tile machinery, not a divergent path.
+        # Same tile count -> same lowering structure: the auto pass reuses the
+        # manual coarse-tile machinery, not a divergent path.
+        def ops(block):
+            return re.findall(r"op='(\w+)'", block)
+
+        def counts(block):
+            return re.findall(r"count=sympify\('(\d+)'\)", block)
+
         self.assertIn("op='add'", auto_block)
-        self.assertEqual(auto_block, manual_block)
+        self.assertEqual(ops(auto_block), ops(manual_block))
+        self.assertEqual(counts(auto_block), counts(manual_block))
 
 
 class TestSpanOverflowNumericValidation(InductorTestCase):
@@ -6889,7 +6904,7 @@ class TestSpanOverflowNumericValidation(InductorTestCase):
     )
     def test_bmm_to_pointwise_join_numeric_via_manual_hint(self):
         """The BMM -> PW group this branch builds automatically, executed for
-        real -- but requested with a manual ``spyre_hint`` instead.
+        real -- but requested with a manual ``for_each_tile`` loop instead.
 
         Same shapes, same tiled dim, same resulting group as
         ``test_bmm_to_pointwise_join_numeric``; only *who asks for the tile*
@@ -6898,34 +6913,36 @@ class TestSpanOverflowNumericValidation(InductorTestCase):
         per-tile addressing are all correct on hardware for this exact case.
 
         The automatic version is xfailed because the two callers reach
-        different code: ``_maybe_coarse_tile_hints`` runs PRE-stickification,
-        so the operands still carry a plain ``FixedLayout`` and
-        ``_insert_read_copy_ops`` takes its ``else`` branch, while
+        different code: ``splice_while_loops`` (``for_each_tile``) runs
+        PRE-stickification, so the operands still carry a plain ``FixedLayout``
+        and ``_insert_read_copy_ops`` takes its ``else`` branch, while
         ``_maybe_coarse_tile_span_overflow`` runs POST-stickification, hits the
         ``FixedTiledLayout`` branch, and cannot map a bmm's iteration space
         onto an operand's dimensions (see the TODO there).
 
-        Kept here rather than in ``test_coarse_tile_e2e.py`` because its value
-        is as the control for the two xfailed tests above -- it is what they
-        should look like once that branch is fixed.
+        Kept here because its value is as the control for the two xfailed
+        tests above -- it is what they should look like once that branch is
+        fixed.
         """
-        from torch_spyre._inductor import spyre_hint
+        from torch_spyre._inductor.wsr.for_each_tile import for_each_tile
 
         torch.manual_seed(0xAFFE)
         B, H, M, K, N = 1, 20, 16, 64, 32
         a = torch.randn(B, H, M, K, dtype=torch.float16) * 0.1
         b = torch.randn(B, H, K, N, dtype=torch.float16) * 0.1
-        for dim_name, size in (("B", B), ("H", H), ("M", M), ("K", K), ("N", N)):
-            _pnd.declare_tensor_dim(dim_name, size)
 
         def fn(a, b):
-            _pnd.name_tensor_dims(a, ["B", "H", "M", "K"])
-            _pnd.name_tensor_dims(b, ["B", "H", "K", "N"])
-            with spyre_hint(num_tiles_per_dim={"H": 5}):
-                return torch.matmul(a, b) * 2.0
+            def body(_, ops):
+                a_tile, b_tile = ops
+                return None, torch.matmul(a_tile, b_tile) * 2.0
 
-        compare_with_cpu(
-            fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
+            return for_each_tile(
+                body, (a, b), dims=(1, 1), tile_size=H // 5, out_dim=1
+            )[1]
+
+        actual = torch.compile(fn, fullgraph=True)(a.to("spyre"), b.to("spyre"))
+        torch.testing.assert_close(
+            actual.cpu(), torch.matmul(a, b) * 2.0, atol=0.05, rtol=0.05
         )
 
     def _assert_single_loop_spec(self, *expected_ops):
