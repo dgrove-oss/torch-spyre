@@ -30,6 +30,7 @@ from torch._inductor.ir import ComputedBuffer
 
 import torch_spyre._inductor.passes as _passes
 import torch_spyre._inductor.wsr.propagate_named_dims as _pnd
+from torch_spyre._inductor import spyre_hint as _spyre_hint
 from torch_spyre._inductor.pass_utils import find_reduction_var
 from utils_inductor import _compile_and_run, mock_backend_compiler
 
@@ -1008,3 +1009,52 @@ def test_gather_2d_index():
         tensor_dims={x: ["M", "N"], i: ["P", "Q"]},
         expected_propagated_dims=["P", "Q", "N"],
     )
+
+
+# -------- validate_named_dims: expected_* hints must match propagation --------
+
+
+def _compile_expecting_error(fn, x, match):
+    """Compile ``fn`` and require validate_named_dims to reject its hints.
+
+    The assertion fires before assign_dim_hints runs, so the declared dims are
+    not cleared by the pipeline and are reset here to keep later tests clean.
+    """
+    try:
+        with (
+            patch("torch_spyre.execution.kernel_runner.prepare_kernel"),
+            patch("torch_spyre.execution.kernel_runner.launch_jobplan"),
+            mock_backend_compiler(),
+            pytest.raises(Exception, match=match),
+        ):
+            _compile_and_run(fn, [x], DEVICE)
+    finally:
+        _pnd.reset()
+
+
+def test_validate_named_dims_raises_on_mismatch():
+    """validate_named_dims raises when expected_named_dims is wrong."""
+    x = torch.randn(256, 256, dtype=torch.float16, device=DEVICE)
+    _pnd.declare_tensor_dim("A", 256)
+    _pnd.declare_tensor_dim("B", 256)
+    _pnd.name_tensor_dims(x, ["A", "B"])
+
+    def fn(x):
+        with _spyre_hint(expected_named_dims=["WRONG", "DIMS"]):
+            return torch.abs(x)
+
+    _compile_expecting_error(fn, x, "expected_named_dims")
+
+
+def test_validate_reduction_dims_raises_on_mismatch():
+    """validate_named_dims raises when expected_reduction_dims is wrong."""
+    x = torch.randn(512, 256, dtype=torch.float16, device=DEVICE)
+    _pnd.declare_tensor_dim("A", 512)
+    _pnd.declare_tensor_dim("B", 256)
+    _pnd.name_tensor_dims(x, ["A", "B"])
+
+    def fn(x):
+        with _spyre_hint(expected_named_dims=["B"], expected_reduction_dims=["WRONG"]):
+            return x.amin(dim=0)
+
+    _compile_expecting_error(fn, x, "expected_reduction_dims")

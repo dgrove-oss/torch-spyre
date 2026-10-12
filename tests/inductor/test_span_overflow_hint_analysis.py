@@ -7565,3 +7565,189 @@ class TestReadDistanceDrop(InductorTestCase):
                     max_cores=4,
                 )
             )
+
+
+class TestSpanOverflowMutationE2E(InductorTestCase):
+    """Span-overflow auto-tiling on a post-stickify mutation (no spyre_hint)."""
+
+    def setUp(self):
+        super().setUp()
+        torch.manual_seed(45054)
+        _pnd.reset()
+
+    @config.patch(
+        {
+            "sencores": 4,
+            "ignore_span_overflow_hints": False,
+        }
+    )
+    def test_span_overflow_mutation_case_external_input_layout_mismatch(self):
+        """Originally a regression repro for the Case 2/"Case 3"
+        layout-reconciliation gap; now an xfail for a separate, deeper,
+        pre-existing bug this task's fix newly exposes on this exact op.
+
+        Task 2 (this task) deleted the direct-mutation Case 2/"Case 3"
+        branch in `_propagate_tiled_op` entirely, so every cross-loop-group
+        write -- including this test's -- now takes the `_insert_copy_op`
+        path unconditionally. That fix *is* correct and closes the gap this
+        test originally targeted: `TestCoarseTileBufferPropagation`'s
+        `test_case2_condition_now_produces_copy_op` unit test directly
+        confirms the old Case 2 branch's code no longer exists and the
+        copy-op path is taken instead. A control probe run without any
+        divergent input layout at all (plain contiguous `x`/`y`, same
+        shapes, same span-overflow trigger) confirms the external-input-
+        layout-mismatch scenario is no longer what's failing here.
+
+        What still fails: `_insert_copy_op`'s interaction with a
+        post-stickify, span-overflow-scaled `full_buf` has its own,
+        independent, pre-existing addressing bug in `superdsc.py`'s per-arg
+        `device_size`/`device_coordinates` handling -- confirmed present on
+        the *pre-Task-2* code too, via a second control probe that forces a
+        real inside-consumer (so the OLD Case 2/"Case 3" branch does not
+        apply and the OLD code already takes the Case 1 copy-op path) on
+        this same post-stickify span-overflow setup: it fails the same way
+        (~87% mismatch) with zero divergent input layouts. This is the same
+        general class of latent Case-1-copy-path bug flagged as "item 4,
+        out of scope" in task-1-report.md (there triggered by a 3-input
+        case); here it's shown to need neither 3 inputs nor a divergent
+        layout, only `_insert_copy_op` + post-stickify span-overflow with
+        `loop_count > 1`. It was never exercised end to end before because,
+        pre-Task-2, an op with no inside consumers and no loop-internal
+        input (this test's exact shape) always took Case 2 instead, and no
+        other post-stickify span-overflow e2e test in this file forces
+        Case 1 with `loop_count > 1`.
+
+        This bug is in `_insert_copy_op`/`superdsc.py` addressing, not in
+        the Case 2/"Case 3" deletion this task performs, and is out of this
+        task's scope (its fix would require changes to `superdsc.py`, not
+        listed in this task's file scope). Per this task's explicit
+        instructions, this test stays `@unittest.expectedFailure` -- do not
+        un-xfail a test that still fails, and do not reinstate any form of
+        the deleted Case 2/"Case 3" branch as a workaround.
+
+        Confirmed failure mode (current code, post-Task-2 fix): 15779/16384
+        elements (96.3%) mismatch at atol=0.01/rtol=0.01, max abs diff
+        ~6.74 -- still far outside fp16 rounding noise, but a different
+        mismatch count/magnitude than the pre-fix 12221/16384 (74.6%),
+        max abs diff ~5.89 recorded in task-1-report.md, consistent with a
+        different root cause now being hit.
+
+        MAX_SPAN_BYTES is patched down so a small tensor triggers automatic
+        span-overflow tiling without needing a multi-hundred-MB real
+        allocation (technique matches
+        test_span_overflow_hint_analysis.py's TestSpanOverflowNumericValidation
+        class).
+        """
+        from unittest.mock import patch as patch2
+
+        B, Lq, D = 32, 8, 64
+        x_raw = torch.randn(Lq, B, D, dtype=torch.float16)
+        x = x_raw.transpose(0, 1)  # logical [B, Lq, D], non-contiguous strides
+        y = torch.randn(B, Lq, D, dtype=torch.float16)
+
+        def fn(x, y):
+            return x + y
+
+        with patch2(
+            "torch_spyre._inductor.wsr.span_overflow_hint_analysis.MAX_SPAN_BYTES",
+            8192,
+        ):
+            compare_with_cpu(
+                fn, x, y, run_compile=True, run_eager=False, atol=0.01, rtol=0.01
+            )
+
+
+class TestAutoSpanOverflowBmmE2E(InductorTestCase):
+    """Automatic span-overflow planning of a bmm (output + K tiling)."""
+
+    def setUp(self):
+        super().setUp()
+        torch.manual_seed(51966)
+        _pnd.reset()
+
+    @config.patch(
+        {
+            "sencores": 4,
+            "lx_planning": True,
+            "allow_all_ops_in_lx_planning": True,
+            "ignore_span_overflow_hints": False,
+            "enable_reduction_tiling": True,
+        }
+    )
+    def test_auto_span_overflow_bmm_combined_correct(self):
+        """Automatic span planning selects output+K tiling without spyre_hint."""
+        B, M, K, N = 1, 128, 512, 32
+        a = torch.randn(B, M, K, dtype=torch.float16) * 0.01
+        b = torch.randn(B, K, N, dtype=torch.float16) * 0.01
+
+        def fn(a, b):
+            return torch.bmm(a, b)
+
+        with patch(
+            "torch_spyre._inductor.wsr.span_overflow_hint_analysis.MAX_SPAN_BYTES",
+            16 * 1024,
+        ):
+            # Outputs have std ~2e-3 (0.01-scaled inputs, K=512); the tolerance
+            # must sit well below that, or a dropped K partial (~1.6e-3) and
+            # even an all-zero result would pass.
+            compare_with_cpu(
+                fn, a, b, run_compile=True, run_eager=False, atol=5e-4, rtol=0.05
+            )
+
+    def _auto_span_overflow_bmm_source(self, *, enable_reduction_tiling):
+        B, M, K, N = 1, 128, 512, 32
+        a = torch.randn(B, M, K, dtype=torch.float16).to("spyre")
+        b = torch.randn(B, K, N, dtype=torch.float16).to("spyre")
+
+        def fn(a, b):
+            return torch.bmm(a, b)
+
+        with (
+            config.patch(
+                {
+                    "sencores": 4,
+                    "lx_planning": True,
+                    "allow_all_ops_in_lx_planning": True,
+                    "ignore_span_overflow_hints": False,
+                    "enable_reduction_tiling": enable_reduction_tiling,
+                }
+            ),
+            patch(
+                "torch_spyre._inductor.wsr.span_overflow_hint_analysis.MAX_SPAN_BYTES",
+                16 * 1024,
+            ),
+            patch(_LAUNCH_JOBPLAN),
+            patch(_PREPARE_KERNEL),
+            mock_backend_compiler(),
+        ):
+            _, source_codes = run_and_get_code(torch.compile(fn), a, b)
+
+        self.assertTrue(source_codes)
+        return source_codes[0]
+
+    def test_auto_span_overflow_bmm_combined_loopspec(self):
+        """Automatic M+K planning emits the expected nested loop counts."""
+        src = self._auto_span_overflow_bmm_source(enable_reduction_tiling=True)
+
+        self.assertEqual(src.count("LoopSpec("), 2)
+        self.assertIn("count=sympify('8')", src)
+        self.assertIn("count=sympify('2')", src)
+        self.assertIn("coarse_tile_reduce_copy", src)
+
+        # The combine op's accumulator read/write must stay at one fixed
+        # address across the inner K loop: no device_tile_advance_expr.
+        combine = re.search(
+            r"ir_chain=\('bmm', 'coarse_tile_combine_\w+'\).*?args=\[(.*?)\n\s*\]\n",
+            src,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(combine, "expected the combine op's OpSpec in source")
+        self.assertNotIn("device_tile_advance_expr", combine.group(1))
+
+    def test_auto_span_overflow_bmm_kill_switch_rejects_unresolved_k_span(self):
+        """Disabling K tiling must not hide a K span left by output-only tiling."""
+        with self.assertRaisesRegex(
+            Exception,
+            "no combined split.*makes all spans fit",
+        ):
+            self._auto_span_overflow_bmm_source(enable_reduction_tiling=False)
