@@ -91,6 +91,7 @@ from for_each_tile_fixtures import (
     add_tiled_reference,
     batched_online_softmax_fn,
     carried_reduction_fn,
+    fill_add_tiled_fn,
     moe_tile_experts_fn,
     nested_restickify_add_fn,
     outside_consumer_fn,
@@ -1236,6 +1237,44 @@ class TestForEachTileGraphShapesE2E(_DynamoResetTestCase):
         a, x = shaped_randn(256, 128), shaped_randn(128, 256, seed=1)
         ref = a.float().t() + x.float()
         self._check(nested_restickify_add_fn, (a, x), ref, trips=[2, 2])
+
+    def test_loop_invariant_fill_write_does_not_advance(self):
+        """A loop-invariant op's own write inside the loop never advances.
+
+        ``torch.full`` lowers to a scalar-fill ComputedBuffer with no tiled
+        loop variable, so its output is the same buffer on every trip and its
+        TensorArg must carry no ``device_tile_advance_expr``; if it did, the
+        compiler would advance the fill's address each trip.  The advancing
+        references are the tiled add and the copy-out of its tile; the fill's
+        own write is fixed.
+        """
+        import regex as re
+        from torch._inductor.utils import run_and_get_code
+
+        x = shaped_randn(256, 64)
+        compiled = torch.compile(
+            lambda x: fill_add_tiled_fn(x, 64), backend="inductor", fullgraph=True
+        )
+        out, code = run_and_get_code(compiled, x.to(DEVICE_NAME))
+        src = "\n".join(code)
+
+        advances = {
+            m.group(1): m.group(2).count("device_tile_advance_expr=")
+            for m in re.finditer(
+                r"ir_chain=\('(\w+)'[^)]*\).*?args=\[(.*?)\n\s*\]\n", src, re.DOTALL
+            )
+        }
+        self.assertIn("full", advances, f"no OpSpec for the fill in:\n{src}")
+        self.assertEqual(advances["full"], 0, "the fill's own write must not advance")
+        self.assertEqual(
+            sum(advances.values()),
+            2,
+            "expected exactly the tiled add and the copy-out to advance; if this "
+            f"changes, another reference's fixed/advancing status changed: {advances}",
+        )
+        torch.testing.assert_close(
+            out.cpu().float(), x.float() + 0.5, atol=self.ATOL, rtol=self.RTOL
+        )
 
     def test_outside_consumer_after_loop(self):
         a, b, c = (shaped_randn(256, 128, seed=s) for s in range(3))
