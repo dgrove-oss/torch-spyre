@@ -126,7 +126,6 @@ from torch_spyre._inductor.constants import (
 from torch_spyre._inductor import config
 from torch_spyre._inductor.logging_utils import get_inductor_logger, warn_once
 from torch_spyre._inductor.loop_info import (
-    CarriedReductionRecord,
     LoopCarryRecord,
     ReadCopyElisionRecord,
 )
@@ -257,27 +256,11 @@ def _multi_output_extern_kernel_in_live_range(
     return False
 
 
-def _is_carried_reduction_storage(op: Any) -> bool:
-    """True only for the accumulator named by its shared physical contract."""
-
-    record = getattr(op, "_carried_reduction_record", None)
-    return (
-        isinstance(record, CarriedReductionRecord)
-        and record.accumulator_name == op.get_name()
-    )
-
-
 def _is_loop_carry_storage(op: Any) -> bool:
     """True only for storage explicitly created as a counted-loop carry."""
 
     record = getattr(op, "_loop_carry_record", None)
     return isinstance(record, LoopCarryRecord) and record.storage_name == op.get_name()
-
-
-def _is_persistent_accumulator_storage(op: Any) -> bool:
-    """Whether ``op`` has a compiler-proven persistent accumulator contract."""
-
-    return _is_carried_reduction_storage(op) or _is_loop_carry_storage(op)
 
 
 @dataclass(frozen=True)
@@ -561,7 +544,7 @@ def _clear_loop_membership_metadata(op: Operation) -> None:
     clone keeps today's metadata-copy behavior.
     """
 
-    for attr in ("loop_info", "_loop_carry_record", "_carried_reduction_record"):
+    for attr in ("loop_info", "_loop_carry_record"):
         if hasattr(op, attr):
             delattr(op, attr)
 
@@ -972,7 +955,7 @@ class ScratchpadAllocator:
         # A planned source intentionally bypasses the profitability denylist:
         # the relayout planner has already applied its stricter structural gates.
         return (
-            _is_persistent_accumulator_storage(op)
+            _is_loop_carry_storage(op)
             or config.allow_all_ops_in_lx_planning
             or self._get_op_name(op) not in OP_OUTPUT_NOT_GOOD_FOR_LX_REUSE
             or op.get_name() in planned_lx_buffers
@@ -1079,13 +1062,8 @@ class ScratchpadAllocator:
         # repair a mismatched update and therefore keeps the mutation target in
         # HBM, like every other mutation.
         loop_carry_is_safe = not division_is_fixed and _is_loop_carry_storage(op)
-        if name in mutated_buffers and not (
-            _is_carried_reduction_storage(op) or loop_carry_is_safe
-        ):
+        if name in mutated_buffers and not loop_carry_is_safe:
             return "mutation target"
-        # The shared carried-reduction contract names exactly one accumulator
-        # with one in-loop mutator and a closed fill -> combine -> drain
-        # lifetime.  The general mutation gate remains unchanged otherwise.
         if _is_tiled_advancing(op) or _is_read_advancing_anywhere(name, buf_user_deps):
             # LX addresses cannot be expressed as affine.apply symbols today (see
             # compute_ops.py's generate_sdsc, which raises NotImplementedError via

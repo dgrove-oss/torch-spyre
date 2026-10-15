@@ -84,7 +84,6 @@ from .fusion import spyre_fuse_nodes
 from .scheduler import (
     build_loop_scheduler_nodes,
     prepare_spyre_kernels,
-    verify_carried_reduction_ownership,
 )
 from .constants import DEVICE_NAME
 from .deadcode_elimination import deadcode_elimination
@@ -317,15 +316,13 @@ class CustomPostFusionPasses(_SpyreNodePassPipeline):
     def __init__(self):
         # Fusion fixes the final loop coordinates. Every bundle's kernel is
         # then prepared once, with the real finalization, while HBM fallback
-        # is still available. HBM planning claims anything preparation demotes
-        # before the carried-reduction pass checks that its required stages
-        # still exist; emission binds only what pooling decided.
+        # is still available. HBM planning claims anything preparation demotes;
+        # emission binds only what pooling decided.
         super().__init__(
             [
                 spyre_fuse_nodes,
                 prepare_spyre_kernels,
                 hbm_pool_planning,
-                verify_carried_reduction_ownership,
             ]
         )
 

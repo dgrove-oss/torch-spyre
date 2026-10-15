@@ -10044,7 +10044,7 @@ class TestTileHelpers(unittest.TestCase):
 
 class TestCustomPostFusionPassesOrder(unittest.TestCase):
     def test_hbm_pool_planning_runs_after_fusion(self):
-        """Kernels are prepared before HBM placement and stage validation."""
+        """Kernels are prepared before HBM placement."""
         from torch_spyre._inductor.passes import CustomPostFusionPasses
 
         pipeline = CustomPostFusionPasses()
@@ -10055,7 +10055,6 @@ class TestCustomPostFusionPassesOrder(unittest.TestCase):
                 "spyre_fuse_nodes",
                 "prepare_spyre_kernels",
                 "hbm_pool_planning",
-                "verify_carried_reduction_ownership",
             ],
         )
 
@@ -11344,7 +11343,6 @@ class TestDrainPlanPushAndLifetime(unittest.TestCase):
         clone = SimpleNamespace(
             loop_info=object(),
             _loop_carry_record=object(),
-            _carried_reduction_record=object(),
         )
         if with_plan:
             allocator._validated_drain_plans = {"buf2": plan}
@@ -11388,7 +11386,6 @@ class TestDrainPlanPushAndLifetime(unittest.TestCase):
         # loop/carry metadata.
         self.assertFalse(hasattr(result.clone, "loop_info"))
         self.assertFalse(hasattr(result.clone, "_loop_carry_record"))
-        self.assertFalse(hasattr(result.clone, "_carried_reduction_record"))
         result.editor.change_graph_output.assert_called_once_with(
             result.storage_op, result.clone
         )
@@ -11403,7 +11400,6 @@ class TestDrainPlanPushAndLifetime(unittest.TestCase):
         # The ordinary clone path is not touched by the drain-only clearing.
         self.assertTrue(hasattr(result.clone, "loop_info"))
         self.assertTrue(hasattr(result.clone, "_loop_carry_record"))
-        self.assertTrue(hasattr(result.clone, "_carried_reduction_record"))
 
     def test_push_emits_no_copy_when_solver_chose_hbm(self):
         result = self._run_push(with_plan=True, address=None)
@@ -11456,7 +11452,6 @@ class TestDrainPlanPushAndLifetime(unittest.TestCase):
         clone = SimpleNamespace(
             loop_info=object(),
             _loop_carry_record=object(),
-            _carried_reduction_record=object(),
         )
         with (
             patch.object(
@@ -11786,7 +11781,7 @@ class TestHoistedInputClone(unittest.TestCase):
             lx_view=result.lx_view,
             lower_before=None,
         )
-        for attr in ("loop_info", "_loop_carry_record", "_carried_reduction_record"):
+        for attr in ("loop_info", "_loop_carry_record"):
             self.assertTrue(hasattr(result.clone, attr), attr)
         result.set_alloc.assert_called_once_with(result.clone, 0x4000, result.lx_view)
 
@@ -11807,7 +11802,6 @@ class TestHoistedInputClone(unittest.TestCase):
         clone = SimpleNamespace(
             loop_info=object(),
             _loop_carry_record=object(),
-            _carried_reduction_record=object(),
         )
         with (
             patch.object(
@@ -11844,7 +11838,6 @@ class TestHoistedInputClone(unittest.TestCase):
         )
         self.assertFalse(hasattr(result.clone, "loop_info"))
         self.assertFalse(hasattr(result.clone, "_loop_carry_record"))
-        self.assertFalse(hasattr(result.clone, "_carried_reduction_record"))
         result.set_alloc.assert_called_once_with(result.clone, 0x4000, result.lx_view)
 
     def test_push_keeps_todays_input_clone_outside_loops(self):

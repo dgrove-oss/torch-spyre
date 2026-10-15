@@ -133,7 +133,6 @@ def collect_work_division_constraints(
     blocked: set[Symbol] = set()
     allowed_splits: dict[Symbol, frozenset[int]] = {}
     for constraint in (
-        carried_reduction_pinned_row,
         coordinate_mask_blocked_vars,
         conv_spatial_blocked_vars,
         reduction_window_blocked_vars,
@@ -346,33 +345,6 @@ def aligned_ownership_split_domains(
         )
 
     return ConstraintResult(allowed_splits=allowed_splits)
-
-
-def carried_reduction_pinned_row(
-    ctx: WorkDivConstraintContext,
-) -> ConstraintResult:
-    """Keep every stage of a carried sum on its declared output-row split."""
-
-    record = getattr(ctx.op, "_carried_reduction_record", None)
-    if record is None:
-        return ConstraintResult()
-
-    loop_var_dims = getattr(ctx.op, "work_div_loop_info", {})
-    candidates = [
-        sym
-        for sym in ctx.it_space_adjusted
-        if record.row_dim_name in loop_var_dims.get(sym, [])
-    ]
-    if len(candidates) != 1:
-        raise Unsupported(
-            f"{ctx.op.get_name()}: carried reduction row "
-            f"{record.row_dim_name!r} resolved to {candidates}"
-        )
-    return ConstraintResult(
-        allowed_splits={
-            candidates[0]: frozenset({record.required_row_split}),
-        }
-    )
 
 
 def coordinate_mask_blocked_vars(ctx: WorkDivConstraintContext) -> ConstraintResult:

@@ -99,8 +99,6 @@ from ..constants import BATCH_MATMUL_OP, MATMUL_REDUCTION_OPS
 from ..errors import Unsupported
 from ..logging_utils import get_inductor_logger
 from ..loop_info import (
-    CarriedReductionRecord,
-    CarriedReductionSpec,
     CoarseTileInfo,
     LoopCarryRecord,
     PropagationPlan,
@@ -110,7 +108,7 @@ from ..loop_info import (
     ReductionPlan,
     copy_op_metadata,
 )
-from ..propagate_hints import DimHint, get_op_hints
+from ..propagate_hints import DimHint
 from .propagate_named_dims import (
     _DimPropInfo,
     _get_dim_prop_info,
@@ -308,82 +306,6 @@ class _IterationSymbolRemap(NamedTuple):
 class _DivideRangesResult(NamedTuple):
     retiled_info: _RetiledBufferInfo | None
     symbol_remap: _IterationSymbolRemap | None
-
-
-def _work_division_names(op: ComputedBuffer) -> dict[str, int]:
-    """Return the explicit named work-division request attached to ``op``."""
-
-    result: dict[str, int] = {}
-    for _, hint_dict in sorted(get_op_hints(op).items()):
-        result.update(hint_dict.get("work_div") or {})
-    return result
-
-
-def _plan_carried_sum(
-    op: ComputedBuffer,
-    info: CoarseTileInfo,
-    *,
-    is_graph_output: bool,
-    outside_consumer_names: list[str],
-    is_nested: bool,
-) -> CarriedReductionSpec | None:
-    """Recognize the one safe shape for an LX-resident loop-carried sum.
-
-    The work-division hint names the output row dimension.  Resolve it here,
-    before any IR is rewritten, so a misspelled or reduction-dimension hint
-    cannot create a carried accumulator with ambiguous ownership.
-    """
-
-    data = op.data
-    has_work_div = bool(getattr(op, "work_div_loop_info", None))
-    if not (
-        isinstance(data, Reduction)
-        and data.reduction_type == "sum"
-        and getattr(data, "src_dtype", object()) == getattr(data, "dtype", None)
-        and not is_nested
-        and (is_graph_output or has_work_div)
-        and (not outside_consumer_names or has_work_div)
-        and len(info.loop_count) == 1
-        and all(not dims for dims in info.loop_tiled_dims)
-        and info.loop_tiled_reduction_dims == [[0]]
-        and len(data.reduction_ranges) == 1
-    ):
-        return None
-
-    requested = _work_division_names(op)
-    if not requested:
-        return None
-
-    named_symbols = getattr(op, "work_div_loop_info", {})
-    output_symbols = set(list(iteration_space_from_op(op))[: len(data.ranges)])
-    resolved: list[tuple[str, int]] = []
-    unresolved: list[str] = []
-    for name, split in requested.items():
-        symbols = [sym for sym, names in named_symbols.items() if name in names]
-        if len(symbols) != 1 or symbols[0] not in output_symbols:
-            unresolved.append(name)
-            continue
-        if isinstance(split, bool) or not isinstance(split, (int, sympy.Integer)):
-            raise Unsupported(
-                f"coarse_tile: carried sum {op.get_name()} work_div {name!r} "
-                f"must be a positive integer, got {split!r}"
-            )
-        split = int(split)
-        if split < 1:
-            raise Unsupported(
-                f"coarse_tile: carried sum {op.get_name()} work_div {name!r} "
-                f"must be positive, got {split}"
-            )
-        resolved.append((name, split))
-
-    if unresolved or len(resolved) != 1:
-        raise Unsupported(
-            f"coarse_tile: carried sum {op.get_name()} requires exactly one "
-            "work_div on an output row dimension; "
-            f"resolved={resolved}, unresolved={unresolved}"
-        )
-    name, split = resolved[0]
-    return CarriedReductionSpec(name, split)
 
 
 # ---------------------------------------------------------------------------
@@ -996,13 +918,6 @@ def _plan_tiling_propagation(
                 consumer_names, is_graph_output = _find_outside_consumers_planned(
                     buf_name, info.loop_group_id, operations, name_to_group_outer_key
                 )
-                carried = _plan_carried_sum(
-                    op,
-                    info,
-                    is_graph_output=is_graph_output,
-                    outside_consumer_names=consumer_names,
-                    is_nested=outer_fill_loop_info is not None,
-                )
                 reduction_plan = ReductionPlan(
                     reduction_type=reduction_type,
                     identity=identity,
@@ -1012,7 +927,6 @@ def _plan_tiling_propagation(
                     outer_fill_loop_info=outer_fill_loop_info,
                     full_output_strides=full_output_strides,
                     per_tile_strides=per_tile_strides,
-                    carried=carried,
                     full_output_device_layout=_planned_full_device_layout(
                         op, full_output_ranges
                     ),
@@ -5599,42 +5513,12 @@ def _insert_one_read_copy(
             if d in dims
         ]
         if d not in reduction_squeeze_pos:
-            reduction_plan = getattr(
-                getattr(sizing_op_info, "propagation", None), "reduction", None
-            )
-            if getattr(reduction_plan, "carried", None) is None:
-                raise Unsupported(
-                    "coarse_tile: size-one reduction tiles require an explicit "
-                    "carried-reduction plan"
-                )
             # The tiled reduction extent became one, so Inductor removed its
-            # loop symbol.  Preserve its source-buffer address step explicitly
-            # instead of indexing a symbol map that cannot contain it.
-            d_full_size = sympy.Integer(1)
-            for level_idx in reversed(levels_tiling_d):
-                d_full_size *= sizing_op_info.loop_count[level_idx]
-
-            full_sizes = list(full_buf.get_size())
-            full_strides = list(full_buf.layout.stride)
-            active_stride_counts = collections.Counter(active_full_strides)
-            candidates: list[Expr] = []
-            for size, stride in zip(full_sizes, full_strides):
-                if active_stride_counts[stride] > 0:
-                    active_stride_counts[stride] -= 1
-                    continue
-                if sympy.simplify(size - d_full_size) == 0:
-                    candidates.append(stride)
-            if len(candidates) != 1:
-                raise Unsupported(
-                    f"coarse_tile: cannot recover squeezed reduction dim {d} "
-                    f"for read {dep.name}: full_size={d_full_size}, "
-                    f"candidate_strides={candidates}"
-                )
-            running = sympy.Integer(1)
-            for level_idx in reversed(levels_tiling_d):
-                squeezed_advance[level_idx].append((candidates[0], running))
-                running *= sizing_op_info.loop_count[level_idx]
-            continue
+            # loop symbol and there is nothing to map the advance onto.
+            raise Unsupported(
+                "coarse_tile: a tiled reduction whose per-tile extent is one is "
+                "not supported"
+            )
         copy_dim_key = it_idx + reduction_squeeze_pos[d]
         running = sympy.sympify(copy_ranges[copy_dim_key])
         for level_idx in reversed(levels_tiling_d):
@@ -6393,145 +6277,6 @@ def _insert_combine_op(
     return combine_name
 
 
-def _collapse_loop_carried_unit_sum(
-    tiled_op: ComputedBuffer,
-    combine_name: str,
-    operations: list[Operation],
-) -> ComputedBuffer:
-    """Replace a one-expert local sum by its single contribution.
-
-    The combine op performs the real cross-expert sum.  Once coarse tiling has
-    reduced the expert extent to one, retaining a second Reduction is both
-    redundant and unrepresentable by the backend.
-    """
-
-    data = tiled_op.data
-    info = getattr(tiled_op, "loop_info", None)
-    plan = getattr(getattr(info, "propagation", None), "reduction", None)
-    if not (
-        isinstance(data, Reduction)
-        and data.reduction_type == "sum"
-        and data.src_dtype == data.dtype
-        and info is not None
-        and plan is not None
-        and plan.carried is not None
-        and len(data.reduction_ranges) == 1
-        and sympy.sympify(data.reduction_ranges[0]) == 1
-    ):
-        raise Unsupported(
-            f"coarse_tile: carried sum {tiled_op.get_name()} did not reduce "
-            "to one contribution per loop iteration"
-        )
-
-    combine = V.graph.name_to_buffer.get(combine_name)
-    if not (
-        isinstance(combine, ComputedBuffer)
-        and isinstance(combine.data, Pointwise)
-        and isinstance(combine.layout, MutationLayoutSHOULDREMOVE)
-        and _reads_buffer(combine, tiled_op.get_name())
-    ):
-        raise Unsupported(
-            f"coarse_tile: carried sum {tiled_op.get_name()} has no matching "
-            f"combine op {combine_name}"
-        )
-
-    reduction_inner_fn = data.inner_fn
-
-    def contribution_inner_fn(index):
-        return reduction_inner_fn(index, [sympy.Integer(0)])
-
-    contribution_data = Pointwise(
-        device=tiled_op.get_device(),
-        dtype=tiled_op.get_dtype(),
-        inner_fn=contribution_inner_fn,
-        ranges=list(data.ranges),
-    )
-    from ..provenance import preserve_provenance
-
-    preserve_provenance(
-        data,
-        contribution_data,
-        pass_name="coarse_tile",
-        reason="collapse one-expert sum to loop contribution",
-    )
-    from ..pass_utils import replace_computed_buffer_body
-
-    before_symbols = _capture_logical_iteration_symbols(tiled_op)
-
-    contribution = replace_computed_buffer_body(
-        tiled_op,
-        contribution_data,
-        operations,
-        pass_name="coarse_tile",
-        reason="collapse one-expert sum to loop contribution",
-    )
-    _apply_work_div_symbol_remap(
-        contribution,
-        _order_preserving_symbol_remap(
-            contribution,
-            before_symbols,
-            _capture_logical_iteration_symbols(contribution),
-        ),
-    )
-    V.graph.name_to_buffer[contribution.get_name()] = contribution
-    return contribution
-
-
-def _copy_carried_output_dim_names(
-    source: ComputedBuffer,
-    target: ComputedBuffer,
-) -> None:
-    """Copy named dimensions across this order-preserving local rewrite."""
-
-    target.work_div_loop_info = dict(  # type: ignore[attr-defined]
-        getattr(source, "work_div_loop_info", {})
-    )
-    _apply_work_div_symbol_remap(
-        target,
-        _order_preserving_symbol_remap(
-            target,
-            _capture_logical_iteration_symbols(source),
-            _capture_logical_iteration_symbols(target),
-        ),
-    )
-
-
-def _insert_flat_reduction_drain_op(
-    tiled_op: ComputedBuffer,
-    accumulator: ComputedBuffer,
-    output: ComputedBuffer,
-    combine_name: str,
-    operations: list[Operation],
-) -> ComputedBuffer:
-    """Drain a carried accumulator to its graph output once after the loop."""
-
-    device = tiled_op.get_device()
-    assert device is not None
-    drain_data = Pointwise(
-        device=device,
-        dtype=tiled_op.get_dtype(),
-        inner_fn=accumulator.make_loader(),
-        ranges=list(tiled_op.data.ranges),
-    )
-    drain_name = V.graph.qualify_name(
-        f"coarse_tile_reduction_drain_{tiled_op.get_name()}"
-    )
-    drain_buf = ComputedBuffer(
-        name=drain_name,
-        layout=MutationLayoutSHOULDREMOVE(TensorBox(StorageBox(output))),
-        data=drain_data,
-    )
-    drain_buf.origins = tiled_op.origins
-    drain_buf.operation_name = drain_name
-    drain_buf._coarse_tile_force_live = True  # type: ignore[attr-defined]
-    V.graph.name_to_buffer[drain_name] = drain_buf
-
-    combine_buf = V.graph.name_to_buffer[combine_name]
-    assert isinstance(combine_buf, ComputedBuffer)
-    operations.insert(operations.index(combine_buf) + 1, drain_buf)
-    return drain_buf
-
-
 def _insert_reduction_copy_op(
     tiled_op: ComputedBuffer,
     accum_tile: ComputedBuffer,
@@ -6698,8 +6443,6 @@ def _propagate_tiled_reduction_op(
 
     fill_loop_info = reduction_plan.outer_fill_loop_info
     is_nested = reduction_plan.is_nested
-    carried = reduction_plan.carried
-    use_loop_carried_accumulator = carried is not None
 
     if fill_loop_info is not None:
         # outer_fill_loop_info was built at planning time, before _apply_plan
@@ -6759,8 +6502,8 @@ def _propagate_tiled_reduction_op(
     # Use a SpyreConstantFallback scalar as the fill source so that Spyre's
     # kernel codegen can express this as an IDENTITY_OP broadcast.  For the
     # span-overflow path, finalize_layouts has already run so we must assign a
-    # FixedTiledLayout manually here.  For the hint path (pre-stickify),
-    # stickification will overwrite the layout; the manual assignment is
+    # FixedTiledLayout manually here.  For the pre-stickify (for_each_tile)
+    # path, stickification will overwrite the layout; the manual assignment is
     # redundant but harmless.
     dtype = op.get_dtype()
     device = op.get_device()
@@ -6789,38 +6532,11 @@ def _propagate_tiled_reduction_op(
         ranges=fill_ranges,
     )
     fill_name = V.graph.qualify_name(f"coarse_tile_fill_{op.get_name()}")
-    if use_loop_carried_accumulator:
-        # This ordinary buffer is the one value carried across expert-loop
-        # iterations.  It is deliberately separate from the HBM graph output,
-        # which the suffix drain writes once after the loop.
-        if isinstance(fill_target.layout, FixedTiledLayout):
-            fill_layout: FixedLayout = FixedTiledLayout(
-                device,
-                dtype,
-                list(fill_target.layout.size),
-                list(fill_target.layout.stride),
-                fill_target.layout.device_layout,
-            )
-        else:
-            fill_layout = FixedLayout(
-                device,
-                dtype,
-                list(fill_target.layout.size),
-                list(fill_target.layout.stride),
-            )
-        fill_buf = ComputedBuffer(
-            name=fill_name,
-            layout=fill_layout,
-            data=fill_data,
-        )
-        _copy_carried_output_dim_names(op, fill_buf)
-        combine_target = fill_buf
-    else:
-        fill_buf = ComputedBuffer(
-            name=fill_name,
-            layout=MutationLayoutSHOULDREMOVE(TensorBox(StorageBox(fill_target))),
-            data=fill_data,
-        )
+    fill_buf = ComputedBuffer(
+        name=fill_name,
+        layout=MutationLayoutSHOULDREMOVE(TensorBox(StorageBox(fill_target))),
+        data=fill_data,
+    )
     fill_buf.origins = op.origins
     fill_buf.operation_name = fill_name
     if fill_loop_info is not None:
@@ -6845,29 +6561,8 @@ def _propagate_tiled_reduction_op(
         op,
         combine_target,
         operations,
-        is_nested or use_loop_carried_accumulator,
+        is_nested,
     )
-
-    if carried is not None:
-        combine_buf = V.graph.name_to_buffer[combine_name]
-        assert isinstance(combine_buf, ComputedBuffer)
-        _copy_carried_output_dim_names(op, combine_buf)
-        op = _collapse_loop_carried_unit_sum(op, combine_name, operations)
-        drain_buf = _insert_flat_reduction_drain_op(
-            op, combine_target, accum_full, combine_name, operations
-        )
-        _copy_carried_output_dim_names(op, drain_buf)
-        record = CarriedReductionRecord(
-            accumulator_name=combine_target.get_name(),
-            row_dim_name=carried.row_dim_name,
-            required_row_split=carried.required_row_split,
-            fill_name=fill_name,
-            combine_name=combine_name,
-            drain_name=drain_buf.get_name(),
-        )
-        fill_buf._carried_reduction_record = record  # type: ignore[attr-defined]
-        combine_buf._carried_reduction_record = record  # type: ignore[attr-defined]
-        drain_buf._carried_reduction_record = record  # type: ignore[attr-defined]
 
     # For nested case, insert a copy op at the outer loop level that writes
     # accum_tile → accum_full, advancing accum_full across outer output tiles.
