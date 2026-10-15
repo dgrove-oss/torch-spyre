@@ -1927,8 +1927,8 @@ def _check_matmul_broadcast_batch_tiling(
                 "supported -- the backend's batched-matmul scheduling "
                 "primitive requires exactly 1 broadcast element per kernel "
                 "invocation (inp0_reuse_dim.size() == 1). Retile this "
-                "dimension with 1 element per tile (num_tiles_per_dim == "
-                "the dim's full size), or see issue #3927."
+                "dimension with 1 element per tile (tile_size=1), or see "
+                "issue #3927."
             )
 
 
