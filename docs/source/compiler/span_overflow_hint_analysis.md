@@ -819,7 +819,7 @@ synthetic `DimHint` per level.  `coarse_tile` then stamps a multi-level
 `coarse_tile_span_overflow.span_overflow_groups(graph)`:
 
 1. skips auto groups if `config.ignore_span_overflow_hints` is enabled;
-2. skips ops that already have user dim hints;
+2. skips ops that a `for_each_tile` loop already tiles (they carry dim hints);
 3. calls `plan_span_overflow_tile`;
 4. maps each `selected_host_dim` to a concrete output loop symbol via
    `op_out_coords(op)`;
@@ -899,8 +899,8 @@ pass with:
 SPYRE_INDUCTOR_IGNORE_SPAN_OVERFLOW_HINTS=0
 ```
 
-User-authored `spyre_hint` groups take precedence per op.  Automatic hints are
-not added to ops that already carry user dim hints.
+Ops that a `for_each_tile` loop already tiles take precedence.  Automatic hints
+are not added to ops that already carry dim hints.
 
 When span-overflow hints are explicitly enabled, copy-back elision preserves
 Pointwise `FixedTiledLayout` producers instead of rewriting them to mutation

@@ -306,8 +306,12 @@ _E2E_SPLIT_COUNT = 5
 _E2E_TILE_SHAPE = [1, 1639, 256, 64]
 
 
-def _manual_h_hint_group(op, hint_id=1, split_count=_E2E_SPLIT_COUNT):
-    """Return the coarse-tile group produced by spyre_hint over dim H."""
+def _pretiled_h_group(op, hint_id=1, split_count=_E2E_SPLIT_COUNT):
+    """Return a hand-built one-level coarse-tile group splitting dim H.
+
+    It stands for a group a for_each_tile loop would have produced: the op
+    carries a ``DimHint`` over H, as an op that is already tiled does.
+    """
     hint = DimHint(
         dim_names=["H"],
         split_count=split_count,
@@ -1908,9 +1912,9 @@ class TestSpanOverflowGroups(InductorTestCase):
             ):
                 _apply_span_overflow(_graph([producer, matmul1, matmul2]))
 
-    def test_k_only_plan_rejects_manually_tiled_producer(self):
+    def test_k_only_plan_rejects_loop_tiled_producer(self):
         producer = _pointwise_op(_E2E_SHAPE, name="buf0")
-        _manual_h_hint_group(producer)
+        _pretiled_h_group(producer)
         bmm = _reduction_op(
             _E2E_SHAPE,
             name="buf1",
@@ -2086,18 +2090,18 @@ class TestSpanOverflowGroups(InductorTestCase):
         self.assertEqual(restickify_weight.dim_hints[0].loop_var, sympy.Symbol("d0"))
         self.assertEqual(lm_head_bmm.dim_hints[0].loop_var, sympy.Symbol("d1"))
 
-    def test_manually_hinted_producer_blocks_auto_tiled_consumer(self):
-        """A user spyre_hint on a producer must also guard its auto-tiled consumer.
+    def test_loop_tiled_producer_blocks_auto_tiled_consumer(self):
+        """A for_each_tile-tiled producer must also guard its auto-tiled consumer.
 
         auto_tiled_producers only tracks producers this pass tiles itself.
-        assign_dim_hints runs earlier and leaves dim_hints set on any
-        manually-hinted op, so a consumer this pass independently decides to
-        auto-tile must also be checked against those -- reading a manually
-        tiled producer has the exact same unsynchronized-loop-nest risk as
-        reading one this pass auto-tiled itself.
+        splice_while_loops runs earlier and leaves dim_hints set on every op a
+        for_each_tile loop tiles, so a consumer this pass independently
+        decides to auto-tile must also be checked against those -- reading a
+        loop-tiled producer has the exact same unsynchronized-loop-nest risk
+        as reading one this pass auto-tiled itself.
         """
         producer = _pointwise_op(_E2E_SHAPE, name="buf1")
-        _manual_h_hint_group(producer)  # simulates a user spyre_hint
+        _pretiled_h_group(producer)  # simulates a for_each_tile loop
 
         consumer = _pointwise_op(_E2E_SHAPE, name="buf0")
         consumer.get_read_writes = MagicMock(
@@ -5586,7 +5590,7 @@ class TestSpanOverflowLargeShapeContract(InductorTestCase):
                 auto_graph = _graph([auto_op])
                 auto_groups = _apply_span_overflow(auto_graph)
                 manual_graph = _graph([manual_op])
-                manual_groups = _manual_h_hint_group(manual_op)
+                manual_groups = _pretiled_h_group(manual_op)
 
                 self.assertEqual(len(auto_groups), 1)
                 self.assertEqual(len(manual_groups), 1)
