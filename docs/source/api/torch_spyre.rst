@@ -791,15 +791,13 @@ Environment Variables
      - Maximum number of work division buckets (default ``32``)
    * - ``MIN_DEFAULT_GRANULARITY``
      - Minimum default granularity for work division (default ``4``)
-   * - ``SPYRE_INDUCTOR_IGNORE_HINTS``
-     - Ignore ``spyre_hint`` annotations: ``work_div={...}``
-       work-division hints, hint-based working-set reduction, and
-       span-overflow coarse-tiling hints (default ``0``)
+   * - ``SPYRE_INDUCTOR_IGNORE_WORK_DIV_HINTS``
+     - Ignore ``spyre_hint(work_div={...})`` work-division hints and use
+       the automatic work-distribution planner (default ``0``)
    * - ``SPYRE_INDUCTOR_IGNORE_SPAN_OVERFLOW_HINTS``
-     - Ignore only span-overflow coarse-tiling hints; a narrower
-       alternative to ``SPYRE_INDUCTOR_IGNORE_HINTS``.  Defaults to
-       ``1`` (disabled/opt-in): set to ``0`` to enable automatic
-       span-overflow coarse tiling.
+     - Ignore the compiler-generated span-overflow coarse-tiling hints.
+       Defaults to ``1`` (disabled/opt-in): set to ``0`` to enable
+       automatic span-overflow coarse tiling.
    * - ``SPYRE_INDUCTOR_SDSC_CACHE``
      - Cache and reuse ``sdsc.json`` files during codegen when two OpSpecs
        produce identical SuperDSC content, reducing bundle size for

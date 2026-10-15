@@ -440,10 +440,9 @@ def span_overflow_groups(
     """
     from .. import config
 
-    if config.ignore_wsr_hints or config.ignore_span_overflow_hints:
+    if config.ignore_span_overflow_hints:
         logger.debug(
-            "[span-overflow groups] disabled ignore_wsr_hints=%s ignore_span_overflow_hints=%s",
-            config.ignore_wsr_hints,
+            "[span-overflow groups] disabled ignore_span_overflow_hints=%s",
             config.ignore_span_overflow_hints,
         )
         return [], []

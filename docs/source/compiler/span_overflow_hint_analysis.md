@@ -818,8 +818,7 @@ synthetic `DimHint` per level.  `coarse_tile` then stamps a multi-level
 
 `coarse_tile_span_overflow.span_overflow_groups(graph)`:
 
-1. skips auto groups if `config.ignore_wsr_hints` or
-   `config.ignore_span_overflow_hints` is enabled;
+1. skips auto groups if `config.ignore_span_overflow_hints` is enabled;
 2. skips ops that already have user dim hints;
 3. calls `plan_span_overflow_tile`;
 4. maps each `selected_host_dim` to a concrete output loop symbol via
@@ -899,10 +898,6 @@ pass with:
 ```bash
 SPYRE_INDUCTOR_IGNORE_SPAN_OVERFLOW_HINTS=0
 ```
-
-The broader working-set-reduction hint switch also suppresses this path when
-set: `SPYRE_INDUCTOR_IGNORE_HINTS=1` (which populates `config.ignore_wsr_hints`,
-default off) disables both manual and automatic hints with one switch.
 
 User-authored `spyre_hint` groups take precedence per op.  Automatic hints are
 not added to ops that already carry user dim hints.

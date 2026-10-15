@@ -179,11 +179,10 @@ max_buckets: int = int(os.getenv("MAX_BUCKETS", "32"))
 # very small divisor when max_size has many of them.
 min_default_granularity: int = int(os.getenv("MIN_DEFAULT_GRANULARITY", "4"))
 
+# Ignore spyre_hint(work_div=...) and use the automatic work-distribution planner.
 ignore_work_division_hints: bool = (
-    os.environ.get("SPYRE_INDUCTOR_IGNORE_HINTS", "0") == "1"
+    os.environ.get("SPYRE_INDUCTOR_IGNORE_WORK_DIV_HINTS", "0") == "1"
 )
-
-ignore_wsr_hints: bool = os.environ.get("SPYRE_INDUCTOR_IGNORE_HINTS", "0") == "1"
 
 # Temporary kill switch for removing a proven-redundant read copy after LX
 # planning.  A failed proof leaves the original graph unchanged.
@@ -250,9 +249,7 @@ cost_model: str = os.environ.get("SPYRE_DUMP_COST", "")
 # under them. Read by the summarize-sdsc skill. Empty = off.
 dump_cost_expr_file: str = os.environ.get("SPYRE_DUMP_COST_EXPR_FILE", "")
 
-# Disable compiler-generated span-overflow coarse-tiling hints.  The global
-# SPYRE_INDUCTOR_IGNORE_HINTS flag also disables these so one switch can still
-# suppress all WSR/coarse-tiling hint paths.
+# Disable compiler-generated span-overflow coarse-tiling hints.
 #
 # Defaults to disabled (opt-in): span-overflow auto-tiling can synchronize
 # compatible contiguous pointwise groups, but incompatible producer/consumer
@@ -261,8 +258,7 @@ dump_cost_expr_file: str = os.environ.get("SPYRE_DUMP_COST_EXPR_FILE", "")
 # tests exercising this path directly should override via
 # config.patch({"ignore_span_overflow_hints": False}).
 ignore_span_overflow_hints: bool = (
-    ignore_wsr_hints
-    or os.environ.get("SPYRE_INDUCTOR_IGNORE_SPAN_OVERFLOW_HINTS", "1") == "1"
+    os.environ.get("SPYRE_INDUCTOR_IGNORE_SPAN_OVERFLOW_HINTS", "1") == "1"
 )
 
 # Enable reduction-dim (Lk-style) coarse tiling. Defaults to enabled — this
