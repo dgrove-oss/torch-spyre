@@ -1993,47 +1993,6 @@ def test_carried_reduction_verifier_requires_physical_ownership():
         _verify_carried_reduction(missing_view=True)
 
 
-@config.patch(
-    {
-        "sencores": 32,
-        "lx_planning": True,
-        "allow_all_ops_in_lx_planning": True,
-        "layout_solver": "greedy",
-        # co_optimizing_lx_planning defaults on; greedy has no core-division-
-        # capable solver, so co-optimization would otherwise raise unless we
-        # opt into the (here harmless, small-graph) ExhaustiveSearchSolver
-        # fallback.
-        "allow_exhaustive_search": True,
-    }
-)
-def test_carried_reduction_stages_compile_to_a_drain():
-    """Compile the real fill/combine/drain nodes, not hand-built descriptors."""
-
-    torch.manual_seed(0)
-    experts, tokens, hidden = 2, 64, 64
-    values = torch.randn(experts, tokens, hidden, dtype=torch.float16) * 0.1
-    for name, size in (("E", experts), ("T", tokens), ("H", hidden)):
-        _declare_tensor_dim(name, size)
-
-    def fn(values):
-        _name_tensor_dims(values, ["E", "T", "H"])
-        with spyre_hint(
-            num_tiles_per_dim={"E": experts},
-            work_div={"T": 32},
-        ):
-            return values.sum(dim=0)
-
-    device_values = _name_tensor_dims(values.to("spyre"), ["E", "T", "H"])
-    torch._inductor.codecache.FxGraphCache.clear()
-    actual, code = run_and_get_code(
-        torch.compile(fn, dynamic=False, options={"epilogue_fusion": False}),
-        device_values,
-    )
-
-    torch.testing.assert_close(actual.cpu(), fn(values), atol=0.05, rtol=0.05)
-    assert "coarse_tile_reduction_drain" in "\n".join(code)
-
-
 @pytest.mark.parametrize("k", [2, 3, 4, 8, 16, 32])
 def test_completed_reduction_reads_only_terminal_writers(k):
     source = _view({0: 2}, {0: floor(_CORE_ID / k)}, 2 * k)
@@ -2080,56 +2039,6 @@ def test_relayout_splits_rows_and_collects_columns():
         )
         for c in consumers
     }
-
-
-@config.patch(
-    {
-        "sencores": 32,
-        "lx_planning": True,
-        "allow_all_ops_in_lx_planning": True,
-        "layout_solver": "greedy",
-        # co_optimizing_lx_planning defaults on; greedy has no core-division-
-        # capable solver, so co-optimization would otherwise raise unless we
-        # opt into the (here harmless, small-graph) ExhaustiveSearchSolver
-        # fallback.
-        "allow_exhaustive_search": True,
-    }
-)
-def test_carried_reduction_after_tiled_pointwise_producer():
-    """A producer retile must not erase the reduction's named E symbol."""
-
-    torch.manual_seed(0)
-    experts, tokens, hidden = 2, 64, 64
-    values = torch.randn(experts, tokens, hidden, dtype=torch.float16) * 0.1
-    routing = torch.randn(tokens, experts, 1, dtype=torch.float16) * 0.1
-    for name, size in (
-        ("E", experts),
-        ("T", tokens),
-        ("H", hidden),
-        ("ONE", 1),
-    ):
-        _declare_tensor_dim(name, size)
-
-    def fn(values, routing):
-        with spyre_hint(named_dims=["E", "T", "ONE"]):
-            route = routing.permute(1, 0, 2).contiguous().clone()
-        with spyre_hint(
-            num_tiles_per_dim={"E": experts},
-            work_div={"T": 32},
-        ):
-            return (values * route).sum(dim=0)
-
-    device_values = _name_tensor_dims(values.to("spyre"), ["E", "T", "H"])
-    device_routing = routing.to("spyre")
-    torch._inductor.codecache.FxGraphCache.clear()
-    actual, code = run_and_get_code(
-        torch.compile(fn, dynamic=False, options={"epilogue_fusion": False}),
-        device_values,
-        device_routing,
-    )
-
-    torch.testing.assert_close(actual.cpu(), fn(values, routing), atol=0.05, rtol=0.05)
-    assert "coarse_tile_reduction_drain" in "\n".join(code)
 
 
 def _assert_lx_resident_carry(code):

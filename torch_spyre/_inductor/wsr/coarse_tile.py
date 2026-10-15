@@ -30,7 +30,6 @@ to innermost.  For a single-level group this is a 1-element list ``[K]``.
 
 Entry point::
 
-    groups = hints_to_coarse_tile_groups(graph)
     coarse_tile_pre_stickify(graph, groups)
 
 ``groups`` is a list of ``(ops, levels)`` tuples where ``levels`` is a list of
@@ -3125,8 +3124,8 @@ def coarse_tile_pre_stickify(
         seen by CustomPreSchedulingPasses).  Modified in-place when the
         transformation phase inserts new buffer/copy ops.
     groups:
-        Sequence of ``(ops, levels)`` tuples produced by
-        ``hints_to_coarse_tile_groups``.  ``levels`` is a list of
+        Sequence of ``(ops, levels)`` tuples built per spliced loop by the
+        for_each_tile lowering.  ``levels`` is a list of
         ``(hint_id, count)`` pairs, outermost first.
     group_idx_offset:
         Starting index for group IDs assigned to the first group.  Use this
@@ -3159,7 +3158,7 @@ def coarse_tile_post_stickify(
         ``(hint_id, count)`` pairs, outermost first.
     group_idx_offset:
         Starting index for group IDs assigned to the first group.  Use this
-        so span-overflow group IDs do not collide with any hint-driven
+        so span-overflow group IDs do not collide with any for_each_tile
         groups already stamped by an earlier coarse_tile_pre_stickify call.
 
     Every op's device layout is already committed by layout propagation by
@@ -4321,7 +4320,7 @@ def _allocate_full_buffer(
             device_layout,
         )
     else:
-        # Pre-stickify path (hint-driven groups): stickification has not yet
+        # Pre-stickify path (for_each_tile groups): stickification has not yet
         # run, so assign a plain FixedLayout.  Stickification will propagate
         # SpyreTensorLayout to this buffer via the ExternKernel->generic_layout
         # path in propagate_spyre_tensor_layouts.
@@ -5185,7 +5184,7 @@ def _insert_one_read_copy(
     # full_buf already carries a FixedTiledLayout, and every sibling op at
     # this pipeline stage (span_reduction, work_distribution, LX scratchpad
     # planning) expects a copy op to carry one too. On the pre-stickify call
-    # site (_maybe_coarse_tile_hints), full_buf is a plain FixedLayout and
+    # site (splice_while_loops), full_buf is a plain FixedLayout and
     # stickification (which runs later) fills device_layout in normally, so
     # a plain FixedLayout on the copy is correct there.
     full_layout = full_buf.layout

@@ -5744,10 +5744,7 @@ def _forced_span_plan(shape, levels):
 def _forced_reduction_range_plan(split_count, reduction_size, output_split=None):
     """Force a non-matmul Reduction onto a reduction-range tile plan.
 
-    The automatic-span-overflow analogue of the manual
-    ``spyre_hint(expected_reduction_dims=...)`` tests in
-    ``test_coarse_tile_e2e.py``: it drives the *planner output*
-    (``is_reduction=True``), so the full
+    It drives the *planner output* (``is_reduction=True``), so the full
     ``span_overflow_groups -> coarse_tile -> identity-fill/combine/drain``
     path runs for a plain sum/max/min and its result is checked against CPU.
 
@@ -6505,10 +6502,8 @@ class TestSpanOverflowNumericValidation(InductorTestCase):
     regression test. These tests close that gap for both the matmul case and
     the non-matmul-reduction case this change adds.
 
-    No kernel-launch mocking here (unlike ``test_coarse_tile_e2e.py``'s
-    codegen-only tests) -- ``compare_with_cpu`` runs the compiled function for
-    real, the same pattern ``test_coarse_tile_e2e.py`` already uses for its
-    own real numeric tests (e.g. ``test_hint_matmul_row_tiling``).
+    No kernel-launch mocking here, unlike the codegen-only tests above --
+    ``compare_with_cpu`` runs the compiled function for real.
     """
 
     @config.patch(

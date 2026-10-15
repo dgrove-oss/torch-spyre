@@ -22,7 +22,7 @@ that chooses among tilings live elsewhere.
 
 The pass mints hint ids and a group-id offset from bases derived off the graph
 (never a reserved constant), so a tiling applied here cannot collide with a
-hint-driven group already stamped pre-stickification at pass 430. It reuses the
+for_each_tile group already stamped pre-stickification at pass 430. It reuses the
 existing ``coarse_tile`` machinery verbatim; the only new work is lowering a
 ``TileSpec`` to per-op ``DimHint``s and deriving groups as consecutive runs of
 ops that run the same loop nest.
@@ -425,8 +425,8 @@ def derive_tiling_groups(
 ) -> list[tuple[list[Operation], tuple[int, ...]]]:
     """Group consecutive ops that run the same non-empty loop nest.
 
-    Mirrors ``hints_to_coarse_tile_groups``' consecutive-run shape, keyed by
-    each op's nest (:attr:`TileSpec.level_counts`) instead of the hint: a run
+    Groups are consecutive runs, keyed by each op's nest
+    (:attr:`TileSpec.level_counts`): a run
     breaks whenever an op is untiled (absent from ``choices`` or mapped to the
     empty spec) or its nest differs from the run's. Contiguity is a hard
     requirement, not an optimization -- ``validate_coarse_tile_groups`` and
@@ -581,7 +581,7 @@ def _derive_hint_id_base(graph: GraphLowering) -> int:
     """``max(hint_id present in the graph, default=-1) + 1``.
 
     Derived, never a reserved constant: whatever hint ids a pre-stickification
-    hint-driven group already minted, this pass mints strictly above them, so
+    for_each_tile group already minted, this pass mints strictly above them, so
     ``validate_coarse_tile_groups`` can never see a hint id in two groups.
     """
     ids = [h.hint_id for op in graph.operations for h in getattr(op, "dim_hints", [])]
@@ -591,7 +591,7 @@ def _derive_hint_id_base(graph: GraphLowering) -> int:
 def _derive_group_idx_offset(graph: GraphLowering) -> int:
     """``max(loop_group_id[0] present, default=-1) + 1`` -- the same derivation
     ``_maybe_coarse_tile_span_overflow`` uses to avoid a ``loop_group_id``
-    collision with a hint-driven group stamped pre-stickification."""
+    collision with a for_each_tile group stamped pre-stickification."""
     used = [
         op.loop_info.loop_group_id[0]
         for op in graph.operations
@@ -655,7 +655,7 @@ class CoarseTilingPass(ScratchpadOptimizationPass):
                     "which a for_each_tile loop already tiles."
                 )
         # Both bases are derived off the graph *before* this pass stamps any of
-        # its own hints/groups, so pre-existing (hint-driven) ids are avoided
+        # its own hints/groups, so pre-existing (for_each_tile) ids are avoided
         # and the ids this pass mints increase monotonically.
         next_hint_id = _derive_hint_id_base(graph)
         group_idx_offset = _derive_group_idx_offset(graph)
