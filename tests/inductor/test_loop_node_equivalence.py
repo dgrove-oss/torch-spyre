@@ -38,7 +38,7 @@ from torch._inductor.utils import run_and_get_code
 
 import torch_spyre  # noqa: F401  registers the "spyre" device
 from torch_spyre.constants import DEVICE_NAME
-from torch_spyre._inductor import config, loop_node
+from torch_spyre._inductor import loop_node
 from torch_spyre._inductor import passes as ts_passes
 from torch_spyre._inductor.loop_node import LoopNode
 from torch_spyre._inductor.pass_utils import format_operations
@@ -201,6 +201,18 @@ _CASES = {
 }
 
 
+@contextlib.contextmanager
+def _deterministic_algorithms():
+    """``torch.use_deterministic_algorithms(True, warn_only=True)``, restored."""
+    was_on = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(was_on, warn_only=was_warn_only)
+
+
 def _compile(fn, args, extra_patch, *, nodes: bool):
     _Recording.ir_text = ""
     _Recording.per_pass = []
@@ -215,13 +227,13 @@ def _compile(fn, args, extra_patch, *, nodes: bool):
         )
         stack.enter_context(mock.patch.object(loop_node, "BUILD_LOOP_NODES", nodes))
         stack.enter_context(torch._inductor.config.patch(force_disable_caches=True))
-        # The co-optimizing LX planner picks different work splits for the
-        # same graph from one compile to the next with the flat pipeline alone
-        # (sdpa_gqa_tile_nest: 3 distinct results in 4 flat compiles;
-        # triple_nested_stardep_multilevel: 2 in 4), which would make this
-        # comparison say nothing. With it off, 4 flat compiles of each agree
-        # exactly. LX planning itself stays on.
-        stack.enter_context(config.patch({"co_optimizing_lx_planning": False}))
+        # The co-optimizing LX planner's CP-SAT solve is time-bounded
+        # (cpsat_time_limit_seconds) and runs several search workers, so on a
+        # larger graph it returns whichever good solution it reached first and
+        # two compiles of the same graph can get different work splits. With
+        # deterministic algorithms on, it uses a single worker (fixed seed), so
+        # the plan is reproducible and the co-optimizer is compared under nodes.
+        stack.enter_context(_deterministic_algorithms())
         if extra_patch is not None:
             stack.enter_context(extra_patch())
         compiled = torch.compile(fn, backend="inductor", fullgraph=True, dynamic=False)
