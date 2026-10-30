@@ -22,6 +22,7 @@ only this module changes, not its readers.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import sympy
@@ -146,19 +147,21 @@ def _memory_reads(op) -> list[MemoryDep]:
     return [d for d in op.get_read_writes().reads if isinstance(d, MemoryDep)]
 
 
-def _read_record(op, dep: MemoryDep):
+def _read_record(op, dep: MemoryDep, reads: Sequence[MemoryDep] | None = None):
     """``(loop_info, dep_idx)`` for ``dep`` as a read of ``op``, else ``None``.
 
     The kernel gives the k-th read of a (mutation-resolved) buffer name the
     record of the k-th ``MemoryDep`` read with that name, which is the
     record at that read's own position among the ``MemoryDep`` reads; so
     ``dep``'s record is the one at ``dep``'s position.  A ``dep`` equal to two
-    reads takes the first.
+    reads takes the first.  ``reads``, when given, is ``op``'s ``MemoryDep``
+    reads in order, used in place of re-deriving them.
     """
     loop_info = getattr(op, "loop_info", None)
     if loop_info is None or not isinstance(dep, MemoryDep):
         return None
-    reads = _memory_reads(op)
+    if reads is None:
+        reads = _memory_reads(op)
     if dep not in reads:
         return None
     return loop_info, reads.index(dep)
@@ -263,7 +266,9 @@ def output_advance(op: Operation) -> tuple[sympy.Expr, ...]:
     )
 
 
-def read_advances_anywhere(op: Operation, dep: MemoryDep) -> bool:
+def read_advances_anywhere(
+    op: Operation, dep: MemoryDep, *, reads: Sequence[MemoryDep] | None = None
+) -> bool:
     """True if read ``dep`` of ``op`` has a tiled or squeezed entry at any level.
 
     Answers from the record, as ``scratchpad.utils._is_read_advancing_anywhere``
@@ -271,9 +276,13 @@ def read_advances_anywhere(op: Operation, dep: MemoryDep) -> bool:
     differ for a record whose substituted term is zero (a tiled dim whose
     symbol is absent from ``dep.index``), and the existing readers treat such
     a read as advancing.  A read past the end of ``tiled_dims_per_read`` is
-    not advancing, as there.
+    not advancing.
+
+    ``reads`` is ``op``'s ``MemoryDep`` reads in order, for a caller that
+    already holds them (e.g. from ``pass_utils.op_read_writes``); without it
+    they are re-derived from ``op.get_read_writes()``.
     """
-    found = _read_record(op, dep)
+    found = _read_record(op, dep, reads)
     if found is None:
         return False
     loop_info, idx = found

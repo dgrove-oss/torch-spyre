@@ -180,6 +180,17 @@ def test_squeezed_only_read():
     assert read_advances_anywhere(op, X)
 
 
+def test_caller_supplied_reads_are_used_in_place_of_get_read_writes():
+    # scratchpad passes the memoized op_read_writes reads; the record lookup
+    # must use them, not re-trace the op.
+    info = _info(1, per_read=[[[]], [[(0, 4)]]])
+    op = _op(reads=[X, Y], writes=[OUT], info=info)
+    op.get_read_writes = None  # would raise if called
+    assert read_advances_anywhere(op, Y, reads=[X, Y])
+    assert not read_advances_anywhere(op, X, reads=[X, Y])
+    assert not read_advances_anywhere(op, OUT, reads=[X, Y])
+
+
 def test_same_buffer_read_twice_takes_positional_record():
     a = _dep("x", 128 * d0 + d1)
     b = _dep("x", d1)
